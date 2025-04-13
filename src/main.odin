@@ -41,21 +41,28 @@ main :: proc() {
 	ok = sdl.ClaimWindowForGPUDevice(gpu, window);sdl_err(ok)
 
 	vertices := []Vertex_Data {
-		{pos = {-0.5, -0.5, 0}, color = {1, 0, 0, 1}},
-		{pos = {0, 0.5, 0}, color = {0, 1, 0, 1}},
-		{pos = {0.5, -0.5, 0}, color = {0, 0, 1, 1}},
+		{pos = {-0.5, 0.5, 0}, color = {1, 0, 0, 1}}, // tl
+		{pos = {0.5, 0.5, 0}, color = {0, 1, 1, 1}}, // tr
+		{pos = {-0.5, -0.5, 0}, color = {0, 1, 0, 1}}, // bl
+		{pos = {0.5, -0.5, 0}, color = {1, 1, 0, 1}}, // br
 	}
 	vertices_byte_size := len(vertices) * size_of(Vertex_Data)
 	vertices_byte_size_u32 := u32(vertices_byte_size)
 	vertex_buf := sdl.CreateGPUBuffer(gpu, {usage = {.VERTEX}, size = vertices_byte_size_u32})
+
+	indices := []u16{0, 1, 2, 2, 1, 3}
+	indices_byte_size := len(indices) * size_of(u16)
+	indices_byte_size_u32 := u32(indices_byte_size)
+	indices_buf := sdl.CreateGPUBuffer(gpu, {usage = {.INDEX}, size = indices_byte_size_u32})
 	//cpy to gpu
 	{
 		transfer_buf := sdl.CreateGPUTransferBuffer(
 			gpu,
-			{usage = .UPLOAD, size = vertices_byte_size_u32},
+			{usage = .UPLOAD, size = vertices_byte_size_u32 + indices_byte_size_u32},
 		)
-		transfer_mem := sdl.MapGPUTransferBuffer(gpu, transfer_buf, false)
+		transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(gpu, transfer_buf, false)
 		mem.copy(transfer_mem, raw_data(vertices), vertices_byte_size)
+		mem.copy(transfer_mem[vertices_byte_size:], raw_data(indices), indices_byte_size)
 		sdl.UnmapGPUTransferBuffer(gpu, transfer_buf)
 
 		copy_cmd_buf := sdl.AcquireGPUCommandBuffer(gpu);sdl_err(copy_cmd_buf)
@@ -68,6 +75,12 @@ main :: proc() {
 			copy_pass,
 			{transfer_buffer = transfer_buf},
 			{buffer = vertex_buf, size = vertices_byte_size_u32},
+			false,
+		)
+		sdl.UploadToGPUBuffer(
+			copy_pass,
+			{transfer_buffer = transfer_buf, offset = vertices_byte_size_u32},
+			{buffer = indices_buf, size = indices_byte_size_u32},
 			false,
 		)
 	}
@@ -169,7 +182,12 @@ main :: proc() {
 				&(sdl.GPUBufferBinding{buffer = vertex_buf}),
 				1,
 			)
-			sdl.DrawGPUPrimitives(render_pass, 3, 1, 0, 0)
+			sdl.BindGPUIndexBuffer(
+				render_pass,
+				sdl.GPUBufferBinding{buffer = indices_buf},
+				._16BIT,
+			)
+			sdl.DrawGPUIndexedPrimitives(render_pass, 6, 1, 0, 0, 0)
 
 		}
 	}
