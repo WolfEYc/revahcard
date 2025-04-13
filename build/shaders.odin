@@ -1,5 +1,6 @@
 package build
 
+import shared "../shared"
 import "core:flags"
 import "core:fmt"
 import "core:log"
@@ -9,14 +10,10 @@ import "core:slice"
 import "core:strings"
 import "core:time"
 
-shader_dir :: "shaders"
-dist_dir :: "dist"
-out_shader_ext :: "spv"
-
 
 main :: proc() {
 	context.logger = log.create_console_logger()
-	dir, err := os.open(shader_dir)
+	dir, err := os.open(shared.shader_dir)
 	if err != nil {
 		log.panicf("failed to open shader_dir, reason: %s", err)
 	}
@@ -26,13 +23,9 @@ main :: proc() {
 	if err != nil {
 		log.panicf("failed to stat shader_dir, reason: %s", err)
 	}
-	log.infof("compiling shaders in %s", shader_dir_stats.fullpath)
 
 	dir_iter := os.read_directory_iterator_create(dir)
 
-	cmd_slice := make([]string, 4)
-	cmd_slice[0] = "glslc"
-	cmd_slice[2] = "-o"
 	pool_cap := max(os1.processor_core_count() - 1, 1)
 	pool_len := 0
 	ShaderProc :: struct {
@@ -74,23 +67,29 @@ main :: proc() {
 		pool_len^ = p_len
 	}
 
+	cmd_slice := make([]string, 5)
+	cmd_slice[0] = "glslc"
+	cmd_slice[2] = "-o"
+	cmd_slice[4] = "--target-env=" + shared.target_env
+	log.infof("compiling shaders in %s", shader_dir_stats.fullpath)
 	for info in os.read_directory_iterator(&dir_iter) {
 		in_name_splits, alloc_err := strings.split(info.name, ".")
 		if alloc_err != nil {
 			log.panic(err)
 		}
-		in_name_splits[1] = out_shader_ext
+		in_name_splits[1] = shared.out_shader_ext
 		out_name: string
 		out_name, alloc_err = strings.join(in_name_splits, ".")
 		if alloc_err != nil {
 			log.panic(err)
 		}
-
-		out_path, err := os.join_path([]string{dist_dir, shader_dir, out_name}, context.allocator)
+		out_path, err := os.join_path(
+			[]string{shared.dist_dir, shared.shader_dir, out_name},
+			context.allocator,
+		)
 		if err != nil {
 			log.panic(err)
 		}
-		log.debugf("compiling in_path=%s out_path=%s", info.fullpath, out_path)
 		out_file_info: os.File_Info
 		out_file_info, err = os.stat(out_path, context.allocator)
 		if err == nil && time.diff(info.modification_time, out_file_info.modification_time) > 0 {
@@ -100,6 +99,7 @@ main :: proc() {
 
 		cmd_slice[1] = info.fullpath
 		cmd_slice[3] = out_path
+		log.debugf("%s", cmd_slice)
 		process: os.Process
 		process, err = os.process_start(
 			{command = cmd_slice, stdout = os.stderr, stderr = os.stderr},
