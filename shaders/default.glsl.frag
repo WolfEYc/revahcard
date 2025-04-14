@@ -2,9 +2,9 @@
 
 layout(location=0) in vec4 color;
 
-layout(location=0) out vec4 frag_color;
+layout(location=0) out vec4 out_color;
 
 
 void main() {
-    frag_color = color;
+    out_color = color;
 }
