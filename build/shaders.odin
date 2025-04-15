@@ -20,6 +20,7 @@ main :: proc() {
 	defer os.close(dir)
 	shader_dir_stats: os.File_Info
 	shader_dir_stats, err = os.fstat(dir, context.temp_allocator)
+	//TODO create shader directory if not exists
 	if err != nil {
 		log.panicf("failed to stat shader_dir, reason: %s", err)
 	}
