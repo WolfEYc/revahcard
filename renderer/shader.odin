@@ -1,6 +1,6 @@
-package main
+package renderer
 
-import shared "../shared"
+import "../constants"
 import "core:encoding/json"
 import "core:log"
 import "core:os"
@@ -22,7 +22,7 @@ load_shader :: proc(
 	}
 
 	shaderfile := filepath.join(
-		{shared.dist_dir, shared.shader_dir, shaderfile},
+		{constants.dist_dir, constants.shader_dir, shaderfile},
 		context.temp_allocator,
 	)
 	code, ok := os.read_entire_file_from_filename(shaderfile, context.temp_allocator);assert(ok)
