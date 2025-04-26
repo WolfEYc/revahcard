@@ -1,73 +1,81 @@
-package entityarena
+package pool
 
 import "base:runtime"
 import "core:slice/heap"
 
-Entity_Idx :: u32
+Pool_Idx :: u32
 Gen_Counter :: u32
-Entity_Key :: struct {
-	idx: Entity_Idx,
+Pool_Key :: struct {
+	idx: Pool_Idx,
 	gen: Gen_Counter,
 }
 
 // yeah these guys are made to live forever, so pretty much just leak them LOL!!!
-Entity_Pool :: struct($T: typeid) {
+Pool :: struct($T: typeid) {
 	_entities:        []T,
 	_actives:         []bool,
 	_gens:            []Gen_Counter,
-	_vacant_min_heap: []Entity_Idx,
-	_free_buf:        []Entity_Idx,
-	_insert_buf:      []Entity_Idx,
-	_vacant_len:      Entity_Idx,
-	_max_used_len:    Entity_Idx,
-	_free_buf_len:    Entity_Idx,
-	_insert_buf_len:  Entity_Idx,
-	_max_active_len:  Entity_Idx, // useful for not wasting iterating into the inactive only entities range
-	cap:              Entity_Idx,
+	_vacant_min_heap: []Pool_Idx,
+	_free_buf:        []Pool_Idx,
+	_insert_buf:      []Pool_Idx,
+	_vacant_len:      Pool_Idx,
+	_max_used_len:    Pool_Idx,
+	_free_buf_len:    Pool_Idx,
+	_insert_buf_len:  Pool_Idx,
+	_max_active_len:  Pool_Idx, // useful for not wasting iterating into the inactive only entities range
+	_num_actives:     Pool_Idx,
+	_entity_free_cb:  proc(entity: T),
 }
 
-new :: proc($T: typeid, cap: Entity_Idx) -> (pool: Entity_Pool(T), err: runtime.Allocator_Error) {
+
+make :: proc(
+	$T: typeid,
+	cap: Pool_Idx,
+	entity_free_cb: proc(entity: T) = nil,
+) -> (
+	pool: Pool(T),
+	err: runtime.Allocator_Error,
+) {
 	Entity_Elem :: struct {
 		entity:     T,
 		actives:    bool,
 		gen:        Gen_Counter,
-		heap_idx:   Entity_Idx,
-		free_buf:   Entity_Idx,
-		insert_buf: Entity_Idx,
+		heap_idx:   Pool_Idx,
+		free_buf:   Pool_Idx,
+		insert_buf: Pool_Idx,
 	}
 	Entity_SOA :: #soa[]Entity_Elem
 	pool_mem: Entity_SOA
-	pool_mem, err = make(Entity_SOA, cap)
-	if err != nil {
-		return
-	}
+	pool_mem = runtime.make(Entity_SOA, cap) or_return
 	pool._entities, pool._actives, pool._gens, pool._vacant_min_heap, pool._free_buf, pool._insert_buf :=
 		soa_unzip(pool_mem)
-	pool.cap = cap
+	pool._entity_free_cb = entity_free_cb
 }
 
-min_heap_less :: proc(a, b: Entity_Idx) -> bool {
+
+@(private)
+min_heap_less :: #force_inline proc(a, b: Pool_Idx) -> bool {
 	return a > b
 }
 
-validate_idx :: #force_inline proc(pool: ^Entity_Pool($T), key: Entity_Key) -> bool {
-	assert(key < pool.cap)
+validate_idx :: #force_inline proc(pool: ^Pool($T), key: Pool_Key) -> bool #no_bounds_check {
+	assert(key.idx < pool._max_used_len)
 	return key.gen != 0 && pool._actives[key.idx] && key.gen == pool._gens[key.idx]
 }
 
 @(require_results)
-get :: #force_inline proc(pool: ^Entity_Pool($T), key: Entity_Key) -> (res: ^T, ok: bool) {
+get :: #force_inline proc(pool: ^Pool($T), key: Pool_Key) -> (res: ^T, ok: bool) #no_bounds_check {
 	if !validate_idx(pool, key) do return
 	res = &pool._entities[idx.idx]
 	ok = true
 }
 
 next :: #force_inline proc(
-	pool: ^Entity_Pool($T),
-	idx: ^Entity_Idx,
+	pool: ^Pool($T),
+	idx: ^Pool_Idx,
 ) -> (
 	entity: ^T,
-	key: Entity_Key,
+	key: Pool_Key,
 	ok: bool,
 ) {
 	i := idx^
@@ -83,51 +91,54 @@ next :: #force_inline proc(
 }
 
 @(private)
-backtrack_max_active_idx :: proc(pool: ^Entity_Pool($T)) {
+backtrack_max_active_idx :: proc(pool: ^Pool($T)) {
 	for pool._max_active_len > 0 && !pool._actives[pool._max_active_len] {
 		pool._max_active_len -= 1
 	}
 }
 
 @(private)
-free :: #force_inline proc(pool: ^Entity_Pool($T), idx: Entity_Idx) {
+free :: #force_inline proc(pool: ^Pool($T), idx: Pool_Idx) {
 	pool._actives[idx] = false
-	pool._vacant_min_heap[pool.cap - 1] = idx
+	pool._vacant_min_heap[len(pool._entities) - 1] = idx
 	heap.push(pool._vacant_min_heap, min_heap_less)
+	if pool._entity_free_cb != nil do pool._entity_free_cb(pool._entities[idx])
 }
 
-free_immediate :: proc(pool: ^Entity_Pool($T), key: Entity_Key) {
+free_immediate :: proc(pool: ^Pool($T), key: Pool_Key) {
 	if !validate_idx(pool, key) do return
 	free(pool, idx.idx)
 	backtrack_max_active_idx(pool)
+	pool._vacant_len += 1
 }
 
-free_defered :: #force_inline proc(pool: ^Entity_Pool($T), key: Entity_Key) {
+free_defered :: #force_inline proc(pool: ^Pool($T), key: Pool_Key) {
 	if !validate_idx(pool, key) do return
 	pool._free_buf[pool._free_buf_len] = idx.idx
 	pool._free_buf_len += 1
 }
 
-flush_frees :: proc(pool: ^Entity_Pool($T)) {
+flush_frees :: proc(pool: ^Pool($T)) {
 	for idx in pool._free_buf[:pool._free_buf_len] {
 		free(pool, idx)
 	}
+	pool._vacant_len += pool._free_buf_len
 	pool._free_buf_len = 0
 	backtrack_max_active_idx(pool)
 }
 
 insert_immediate :: proc(
-	pool: ^Entity_Pool($T),
+	pool: ^Pool($T),
 	elem: T,
 ) -> (
-	key: Entity_Key,
+	key: Pool_Key,
 	err: runtime.Allocator_Error,
 ) {
 	if pool == nil {
 		err = runtime.Allocator_Error.Invalid_Pointer
 		return
 	}
-	if pool._max_used_len == pool.cap {
+	if pool._vacant_len == 0 && pool._max_used_len == len(pool._entities) {
 		err = runtime.Allocator_Error.Out_Of_Memory
 		return
 	}
@@ -144,7 +155,7 @@ insert_immediate :: proc(
 		// reuse slot
 		heap.pop(pool._vacant_min_heap, min_heap_less)
 		pool._vacant_len -= 1
-		vacant_idx := pool._vacant_min_heap[pool.cap - 1]
+		vacant_idx := pool._vacant_min_heap[len(pool._entities) - 1]
 		pool._entities[vacant_idx] = elem
 		pool._gens[vacant_idx] += 1
 		pool._actives[vacant_idx] = true
@@ -152,20 +163,15 @@ insert_immediate :: proc(
 		key.gen = pool._gens[vacant_idx]
 		pool._max_active_len = max(pool._max_active_len, vacant_idx + 1)
 	}
+	pool._num_actives += 1
 }
 
-insert_defered :: proc(
-	pool: ^Entity_Pool($T),
-	elem: T,
-) -> (
-	key: Entity_Key,
-	err: runtime.Allocator_Error,
-) {
+insert_defered :: proc(pool: ^Pool($T), elem: T) -> (key: Pool_Key, err: runtime.Allocator_Error) {
 	if pool == nil {
 		err = runtime.Allocator_Error.Invalid_Pointer
 		return
 	}
-	if pool._max_used_len == pool.cap {
+	if pool._vacant_len == 0 && pool._max_used_len == len(pool._entities) {
 		err = runtime.Allocator_Error.Out_Of_Memory
 		return
 	}
@@ -185,7 +191,7 @@ insert_defered :: proc(
 		// reuse slot
 		heap.pop(pool._vacant_min_heap, min_heap_less)
 		pool._vacant_len -= 1
-		key.idx = pool._vacant_min_heap[pool.cap - 1]
+		key.idx = pool._vacant_min_heap[len(pool._entities) - 1]
 
 		key.gen = pool._gens[key.idx] + 1
 		pool._gens[key.idx] = key.gen
@@ -196,11 +202,12 @@ insert_defered :: proc(
 	}
 }
 
-flush_inserts :: proc(pool: ^Entity_Pool($T)) {
+flush_inserts :: proc(pool: ^Pool($T)) {
 	for idx in pool._insert_buf[:pool._insert_buf_len] {
 		pool._actives[idx] = true
 		pool._max_active_len = max(pool._max_active_len, idx + 1)
 	}
+	pool._num_actives += pool._insert_buf_len
 	pool._insert_buf_len = 0
 }
 

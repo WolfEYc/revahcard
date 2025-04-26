@@ -1,10 +1,12 @@
 package renderer
 
 import "../constants"
+import "../shared/astc"
 import gltf "../shared/glTF2"
+import "../shared/pool"
 import sdl "vendor:sdl3"
-import sdli "vendor:sdl3/image"
 
+import "base:runtime"
 import "core:log"
 import lal "core:math/linalg"
 import "core:mem"
@@ -22,34 +24,41 @@ sdl_err :: proc {
 	sdl_nil_panic,
 }
 
-
+MAX_ENTITY_COUNT :: 65536
+MAX_MESH_COUNT :: 4096
 Renderer :: struct {
 	gpu:             ^sdl.GPUDevice,
 	window:          ^sdl.Window,
 	entity_pipeline: ^sdl.GPUGraphicsPipeline,
+	nodes:           pool.Pool(Node),
+	meshes:          [dynamic],
+	materials:       pool.Pool(Material),
+	textures:        pool.Pool(Texture),
+	images:          pool.Pool(^sdl.GPUTexture),
+	samplers:        pool.Pool(^sdl.GPUSampler),
 }
 Node :: struct {
 	name:     string,
 	mat:      matrix[4, 4]f32,
-	parent:   EntityIdx,
-	children: []EntityIdx,
-	mesh:     EntityIdx,
+	parent:   pool.Pool_Key,
+	children: []pool.Pool_Key,
+	mesh:     pool.Pool_Key,
 }
 
 Mesh :: struct {
-	vertices: EntityIdx,
-	indices:  EntityIdx,
-	material: EntityIdx,
+	vertices: pool.Pool_Key,
+	indices:  pool.Pool_Key,
+	material: pool.Pool_Key,
 }
 
 Material :: struct {
 	name:            string,
-	pipeline:        EntityIdx,
-	base_color_tex:  EntityIdx,
-	metal_rough_tex: EntityIdx,
-	normal_tex:      EntityIdx,
-	ao_tex:          EntityIdx,
-	emissive_tex:    EntityIdx,
+	pipeline:        pool.Pool_Key,
+	base_color_tex:  pool.Pool_Key,
+	metal_rough_tex: pool.Pool_Key,
+	normal_tex:      pool.Pool_Key,
+	ao_tex:          pool.Pool_Key,
+	emissive_tex:    pool.Pool_Key,
 	alpha_mode:      gltf.Material_Alpha_Mode,
 	alpha_cutoff:    f32,
 	emissive_factor: [3]f32,
@@ -58,8 +67,69 @@ Material :: struct {
 
 Texture :: struct {
 	name:    string,
-	texture: EntityIdx,
-	sampler: EntityIdx,
+	image:   pool.Pool_Key,
+	sampler: pool.Pool_Key,
+}
+
+Vertex_Data :: struct {
+	pos: [3]f32,
+	uv:  [2]f32,
+}
+@(private)
+make_entity_pipeline :: proc(r: ^Renderer) {
+	vert_shader := load_shader(r.gpu, "default.spv.vert", {uniform_buffers = 1})
+	frag_shader := load_shader(r.gpu, "default.spv.frag", {})
+
+	vertex_attrs := []sdl.GPUVertexAttribute {
+		{location = 0, format = .FLOAT3, offset = u32(offset_of(Vertex_Data, pos))},
+		{location = 1, format = .FLOAT2, offset = u32(offset_of(Vertex_Data, uv))},
+	}
+	r.entity_pipeline = sdl.CreateGPUGraphicsPipeline(
+		r.gpu,
+		{
+			vertex_shader = vert_shader,
+			fragment_shader = frag_shader,
+			primitive_type = .TRIANGLELIST,
+			vertex_input_state = {
+				num_vertex_buffers = 1,
+				vertex_buffer_descriptions = &(sdl.GPUVertexBufferDescription {
+						slot = 0,
+						pitch = size_of(Vertex_Data),
+					}),
+				num_vertex_attributes = u32(len(vertex_attrs)),
+				vertex_attributes = raw_data(vertex_attrs),
+			},
+			target_info = {
+				num_color_targets = 1,
+				color_target_descriptions = &(sdl.GPUColorTargetDescription {
+						format = sdl.GetGPUSwapchainTextureFormat(r.gpu, r.window),
+					}),
+			},
+		},
+	)
+	sdl.ReleaseGPUShader(r.gpu, vert_shader)
+	sdl.ReleaseGPUShader(r.gpu, frag_shader)
+}
+
+make :: proc(
+	gpu: ^sdl.GPUDevice,
+	window: ^sdl.Window,
+) -> (
+	r: Renderer,
+	err: runtime.Allocator_Error,
+) {
+	r.gpu = gpu
+	r.window = window
+	make_entity_pipeline(&r)
+
+	r.nodes = pool.make(Node, MAX_ENTITY_COUNT) or_return
+	// r.meshes = pool.make(Mesh, MAX_ENTITY_COUNT) or_return
+	// meshes:          pool.Pool(Mesh),
+	// materials:       pool.Pool(Material),
+	// textures:        pool.Pool(Texture),
+	// images:          pool.Pool(^sdl.GPUTexture),
+	// samplers:        pool.Pool(^sdl.GPUSampler),
+	return
 }
 
 load_glb :: proc(r: ^Renderer, file_name: string) {
