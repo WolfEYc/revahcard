@@ -3,6 +3,7 @@ package renderer
 import "../constants"
 import "../shared/astc"
 import gltf "../shared/glTF2"
+import "../shared/glist"
 import "../shared/pool"
 import sdl "vendor:sdl3"
 
@@ -10,6 +11,7 @@ import "base:runtime"
 import "core:log"
 import lal "core:math/linalg"
 import "core:mem"
+import os "core:os/os2"
 import "core:path/filepath"
 
 sdl_ok_panic :: proc(ok: bool) {
@@ -24,41 +26,48 @@ sdl_err :: proc {
 	sdl_nil_panic,
 }
 
-MAX_ENTITY_COUNT :: 65536
-MAX_MESH_COUNT :: 4096
+MAX_ENTITY_COUNT :: 4096
+MAX_MESH_COUNT :: 1024
+MAX_MATERIAL_COUNT :: 512
+MAX_TEXTURE_COUNT :: 512
+MAX_SAMPLER_COUNT :: 512
+MAX_IMAGE_COUNT :: 256
+
 Renderer :: struct {
-	gpu:             ^sdl.GPUDevice,
-	window:          ^sdl.Window,
-	entity_pipeline: ^sdl.GPUGraphicsPipeline,
-	nodes:           pool.Pool(Node),
-	meshes:          [dynamic],
-	materials:       pool.Pool(Material),
-	textures:        pool.Pool(Texture),
-	images:          pool.Pool(^sdl.GPUTexture),
-	samplers:        pool.Pool(^sdl.GPUSampler),
+	gpu:          ^sdl.GPUDevice,
+	window:       ^sdl.Window,
+	pbr_pipeline: ^sdl.GPUGraphicsPipeline,
+	copy_pass:    ^sdl.GPUCopyPass,
+	nodes:        glist.Glist(Node),
+	meshes:       glist.Glist(Mesh),
+	materials:    glist.Glist(Material),
+	textures:     glist.Glist(Texture),
+	images:       glist.Glist(^sdl.GPUTexture),
+	samplers:     glist.Glist(^sdl.GPUSampler),
+	vertices:     glist.Glist(^sdl.GPUVertex),
 }
+
 Node :: struct {
 	name:     string,
 	mat:      matrix[4, 4]f32,
-	parent:   pool.Pool_Key,
-	children: []pool.Pool_Key,
-	mesh:     pool.Pool_Key,
+	children: []glist.Glist_Idx,
+	mesh:     glist.Glist_Idx,
 }
 
 Mesh :: struct {
-	vertices: pool.Pool_Key,
-	indices:  pool.Pool_Key,
-	material: pool.Pool_Key,
+	vertices: glist.Glist_Idx,
+	indices:  glist.Glist_Idx,
+	material: glist.Glist_Idx,
 }
 
 Material :: struct {
 	name:            string,
-	pipeline:        pool.Pool_Key,
-	base_color_tex:  pool.Pool_Key,
-	metal_rough_tex: pool.Pool_Key,
-	normal_tex:      pool.Pool_Key,
-	ao_tex:          pool.Pool_Key,
-	emissive_tex:    pool.Pool_Key,
+	pipeline:        glist.Glist_Idx,
+	base_color_tex:  glist.Glist_Idx,
+	metal_rough_tex: glist.Glist_Idx,
+	normal_tex:      glist.Glist_Idx,
+	ao_tex:          glist.Glist_Idx,
+	emissive_tex:    glist.Glist_Idx,
 	alpha_mode:      gltf.Material_Alpha_Mode,
 	alpha_cutoff:    f32,
 	emissive_factor: [3]f32,
@@ -75,8 +84,9 @@ Vertex_Data :: struct {
 	pos: [3]f32,
 	uv:  [2]f32,
 }
+
 @(private)
-make_entity_pipeline :: proc(r: ^Renderer) {
+make_entity_pipeline :: proc(r: Renderer) -> (pipeline: ^sdl.GPUGraphicsPipeline) {
 	vert_shader := load_shader(r.gpu, "default.spv.vert", {uniform_buffers = 1})
 	frag_shader := load_shader(r.gpu, "default.spv.frag", {})
 
@@ -84,7 +94,7 @@ make_entity_pipeline :: proc(r: ^Renderer) {
 		{location = 0, format = .FLOAT3, offset = u32(offset_of(Vertex_Data, pos))},
 		{location = 1, format = .FLOAT2, offset = u32(offset_of(Vertex_Data, uv))},
 	}
-	r.entity_pipeline = sdl.CreateGPUGraphicsPipeline(
+	pipeline = sdl.CreateGPUGraphicsPipeline(
 		r.gpu,
 		{
 			vertex_shader = vert_shader,
@@ -118,17 +128,18 @@ make :: proc(
 	r: Renderer,
 	err: runtime.Allocator_Error,
 ) {
+	ok = sdl.ClaimWindowForGPUDevice(gpu, window);sdl_err(ok)
 	r.gpu = gpu
 	r.window = window
-	make_entity_pipeline(&r)
+
+	r.pbr_pipeline = make_entity_pipeline(r)
 
 	r.nodes = pool.make(Node, MAX_ENTITY_COUNT) or_return
-	// r.meshes = pool.make(Mesh, MAX_ENTITY_COUNT) or_return
-	// meshes:          pool.Pool(Mesh),
-	// materials:       pool.Pool(Material),
-	// textures:        pool.Pool(Texture),
-	// images:          pool.Pool(^sdl.GPUTexture),
-	// samplers:        pool.Pool(^sdl.GPUSampler),
+	r.meshes = glist.make(Mesh, MAX_MESH_COUNT) or_return
+	r.materials = glist.make(Material, MAX_MATERIAL_COUNT) or_return
+	r.textures = glist.make(Texture, MAX_TEXTURE_COUNT) or_return
+	r.images = glist.make(^sdl.GPUTexture, MAX_IMAGE_COUNT) or_return
+	r.samplers = glist.make(^sdl.GPUSampler, MAX_SAMPLER_COUNT) or_return
 	return
 }
 
@@ -146,8 +157,6 @@ load_glb :: proc(r: ^Renderer, file_name: string) {
 
 	copy_pass := sdl.BeginGPUCopyPass(copy_cmd_buf)
 	defer sdl.EndGPUCopyPass(copy_pass)
-
-	data.textures[0]
 
 	for node, i in data.nodes {
 		node_name, has_name := node.name.?
@@ -223,13 +232,14 @@ load_glb :: proc(r: ^Renderer, file_name: string) {
 
 }
 
-load_texture :: proc(r: ^Renderer, file: cstring) -> (texture: ^sdl.GPUTexture) {
-	surface := sdli.Load(file);sdl_err(surface)
-	surface.format
+load_texture :: proc(r: ^Renderer, file: string) -> (texture: ^sdl.GPUTexture) {
+	file_path := filepath.join({constants.dist_dir, constants.texture_dir, file_name})
+	file := os.open(file_path)
+	astc_header := astc.load()
 	texture = sdl.CreateGPUTexture(
 		r.gpu,
 		{
-			format = .R8G8B8A8_UNORM,
+			format = .ASTC_4x4_UNORM,
 			usage = {.SAMPLER},
 			width = u32(surface.w),
 			height = u32(surface.h),

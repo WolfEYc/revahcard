@@ -20,45 +20,14 @@ main :: proc() {
 
 	// init sdl
 	ok := sdl.Init({.VIDEO});sdl_err(ok)
+
+	gpu := sdl.CreateGPUDevice({.SPIRV}, true, "vulkan");sdl_err(gpu)
 	window := sdl.CreateWindow(
 		"Hello Triangle SDL3 Yay",
 		1920,
 		1080,
 		{.FULLSCREEN},
 	);sdl_err(window)
-	gpu := sdl.CreateGPUDevice({.SPIRV}, true, "vulkan");sdl_err(gpu)
-	ok = sdl.ClaimWindowForGPUDevice(gpu, window);sdl_err(ok)
-
-	vert_shader := load_shader(gpu, "default.spv.vert", {uniform_buffers = 1})
-	frag_shader := load_shader(gpu, "default.spv.frag", {})
-
-	vertex_attrs := []sdl.GPUVertexAttribute {
-		{location = 0, format = .FLOAT3, offset = u32(offset_of(Vertex_Data, pos))},
-		{location = 1, format = .FLOAT4, offset = u32(offset_of(Vertex_Data, color))},
-	}
-	pipeline := sdl.CreateGPUGraphicsPipeline(
-		gpu,
-		{
-			vertex_shader = vert_shader,
-			fragment_shader = frag_shader,
-			primitive_type = .TRIANGLELIST,
-			vertex_input_state = {
-				num_vertex_buffers = 1,
-				vertex_buffer_descriptions = &(sdl.GPUVertexBufferDescription {
-						slot = 0,
-						pitch = size_of(Vertex_Data),
-					}),
-				num_vertex_attributes = u32(len(vertex_attrs)),
-				vertex_attributes = raw_data(vertex_attrs),
-			},
-			target_info = {
-				num_color_targets = 1,
-				color_target_descriptions = &(sdl.GPUColorTargetDescription {
-						format = sdl.GetGPUSwapchainTextureFormat(gpu, window),
-					}),
-			},
-		},
-	)
 	win_size: [2]i32
 	ok = sdl.GetWindowSize(window, &win_size.x, &win_size.y);sdl_err(ok)
 	aspect := f32(win_size.x) / f32(win_size.y)

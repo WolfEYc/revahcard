@@ -31,7 +31,7 @@ Pool :: struct($T: typeid) {
 make :: proc(
 	$T: typeid,
 	cap: Pool_Idx,
-	entity_free_cb: proc(entity: T) = nil,
+	entity_free_cb: proc(entity: T) = proc(entity: T) {},
 ) -> (
 	pool: Pool(T),
 	err: runtime.Allocator_Error,
@@ -77,7 +77,7 @@ next :: #force_inline proc(
 	entity: ^T,
 	key: Pool_Key,
 	ok: bool,
-) {
+) #no_bounds_check {
 	i := idx^
 	for ; i < pool._max_active_len; i += 1 {
 		if !pool._actives[i] do continue
@@ -91,34 +91,34 @@ next :: #force_inline proc(
 }
 
 @(private)
-backtrack_max_active_idx :: proc(pool: ^Pool($T)) {
-	for pool._max_active_len > 0 && !pool._actives[pool._max_active_len] {
+backtrack_max_active_idx :: proc(pool: ^Pool($T)) #no_bounds_check {
+	for pool._max_active_len > 0 && !pool._actives[pool._max_active_len - 1] {
 		pool._max_active_len -= 1
 	}
 }
 
 @(private)
-free :: #force_inline proc(pool: ^Pool($T), idx: Pool_Idx) {
+free :: #force_inline proc(pool: ^Pool($T), idx: Pool_Idx) #no_bounds_check {
 	pool._actives[idx] = false
 	pool._vacant_min_heap[len(pool._entities) - 1] = idx
 	heap.push(pool._vacant_min_heap, min_heap_less)
-	if pool._entity_free_cb != nil do pool._entity_free_cb(pool._entities[idx])
+	pool._entity_free_cb(pool._entities[idx])
 }
 
-free_immediate :: proc(pool: ^Pool($T), key: Pool_Key) {
+free_immediate :: proc(pool: ^Pool($T), key: Pool_Key) #no_bounds_check {
 	if !validate_idx(pool, key) do return
 	free(pool, idx.idx)
 	backtrack_max_active_idx(pool)
 	pool._vacant_len += 1
 }
 
-free_defered :: #force_inline proc(pool: ^Pool($T), key: Pool_Key) {
+free_defered :: #force_inline proc(pool: ^Pool($T), key: Pool_Key) #no_bounds_check {
 	if !validate_idx(pool, key) do return
 	pool._free_buf[pool._free_buf_len] = idx.idx
 	pool._free_buf_len += 1
 }
 
-flush_frees :: proc(pool: ^Pool($T)) {
+flush_frees :: proc(pool: ^Pool($T)) #no_bounds_check {
 	for idx in pool._free_buf[:pool._free_buf_len] {
 		free(pool, idx)
 	}
@@ -133,7 +133,7 @@ insert_immediate :: proc(
 ) -> (
 	key: Pool_Key,
 	err: runtime.Allocator_Error,
-) {
+) #no_bounds_check {
 	if pool == nil {
 		err = runtime.Allocator_Error.Invalid_Pointer
 		return
@@ -166,7 +166,13 @@ insert_immediate :: proc(
 	pool._num_actives += 1
 }
 
-insert_defered :: proc(pool: ^Pool($T), elem: T) -> (key: Pool_Key, err: runtime.Allocator_Error) {
+insert_defered :: proc(
+	pool: ^Pool($T),
+	elem: T,
+) -> (
+	key: Pool_Key,
+	err: runtime.Allocator_Error,
+) #no_bounds_check {
 	if pool == nil {
 		err = runtime.Allocator_Error.Invalid_Pointer
 		return
@@ -202,7 +208,7 @@ insert_defered :: proc(pool: ^Pool($T), elem: T) -> (key: Pool_Key, err: runtime
 	}
 }
 
-flush_inserts :: proc(pool: ^Pool($T)) {
+flush_inserts :: proc(pool: ^Pool($T)) #no_bounds_check {
 	for idx in pool._insert_buf[:pool._insert_buf_len] {
 		pool._actives[idx] = true
 		pool._max_active_len = max(pool._max_active_len, idx + 1)
