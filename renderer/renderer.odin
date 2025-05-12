@@ -1,11 +1,10 @@
 package renderer
 
 import "../constants"
-import "../shared/astc"
-import gltf "../shared/glTF2"
-import "../shared/glist"
-import "../shared/pool"
+import "../lib/glist"
+import "../lib/pool"
 import sdl "vendor:sdl3"
+import sdli "vendor:sdl3/image"
 
 import "base:runtime"
 import "core:log"
@@ -13,6 +12,7 @@ import lal "core:math/linalg"
 import "core:mem"
 import os "core:os/os2"
 import "core:path/filepath"
+import "core:strings"
 
 sdl_ok_panic :: proc(ok: bool) {
 	if !ok do log.panicf("SDL Error: {}", sdl.GetError())
@@ -26,63 +26,37 @@ sdl_err :: proc {
 	sdl_nil_panic,
 }
 
-MAX_ENTITY_COUNT :: 4096
-MAX_MESH_COUNT :: 1024
-MAX_MATERIAL_COUNT :: 512
-MAX_TEXTURE_COUNT :: 512
-MAX_SAMPLER_COUNT :: 512
-MAX_IMAGE_COUNT :: 256
+MAX_BLOCK_COUNT :: 4096
 
 Renderer :: struct {
 	gpu:          ^sdl.GPUDevice,
 	window:       ^sdl.Window,
-	pbr_pipeline: ^sdl.GPUGraphicsPipeline,
+	pipeline:     ^sdl.GPUGraphicsPipeline,
+	blocks:       pool.Pool(Node),
+	copy_cmd_buf: ^sdl.GPUCommandBuffer,
 	copy_pass:    ^sdl.GPUCopyPass,
-	nodes:        glist.Glist(Node),
-	meshes:       glist.Glist(Mesh),
-	materials:    glist.Glist(Material),
-	textures:     glist.Glist(Texture),
-	images:       glist.Glist(^sdl.GPUTexture),
-	samplers:     glist.Glist(^sdl.GPUSampler),
-	vertices:     glist.Glist(^sdl.GPUVertex),
 }
 
 Node :: struct {
-	name:     string,
 	mat:      matrix[4, 4]f32,
-	children: []glist.Glist_Idx,
-	mesh:     glist.Glist_Idx,
+	children: []pool.Pool_Key,
 }
 
-Mesh :: struct {
-	vertices: glist.Glist_Idx,
-	indices:  glist.Glist_Idx,
-	material: glist.Glist_Idx,
-}
-
-Material :: struct {
-	name:            string,
-	pipeline:        glist.Glist_Idx,
-	base_color_tex:  glist.Glist_Idx,
-	metal_rough_tex: glist.Glist_Idx,
-	normal_tex:      glist.Glist_Idx,
-	ao_tex:          glist.Glist_Idx,
-	emissive_tex:    glist.Glist_Idx,
-	alpha_mode:      gltf.Material_Alpha_Mode,
-	alpha_cutoff:    f32,
-	emissive_factor: [3]f32,
-	double_sided:    bool,
-}
-
-Texture :: struct {
-	name:    string,
-	image:   pool.Pool_Key,
-	sampler: pool.Pool_Key,
-}
+// figure out card rendering
 
 Vertex_Data :: struct {
 	pos: [3]f32,
 	uv:  [2]f32,
+}
+
+Mesh :: struct {
+	verts: []Vertex_Data,
+	idxs:  []u16,
+}
+
+GPU_Mesh :: struct {
+	vert_buf: ^sdl.GPUBuffer,
+	idx_buf:  ^sdl.GPUBuffer,
 }
 
 @(private)
@@ -119,158 +93,131 @@ make_entity_pipeline :: proc(r: Renderer) -> (pipeline: ^sdl.GPUGraphicsPipeline
 	)
 	sdl.ReleaseGPUShader(r.gpu, vert_shader)
 	sdl.ReleaseGPUShader(r.gpu, frag_shader)
+	return
 }
 
-make :: proc(
+new :: proc(
 	gpu: ^sdl.GPUDevice,
 	window: ^sdl.Window,
 ) -> (
 	r: Renderer,
 	err: runtime.Allocator_Error,
 ) {
-	ok = sdl.ClaimWindowForGPUDevice(gpu, window);sdl_err(ok)
+	ok := sdl.ClaimWindowForGPUDevice(gpu, window);sdl_err(ok)
 	r.gpu = gpu
 	r.window = window
 
-	r.pbr_pipeline = make_entity_pipeline(r)
+	r.pipeline = make_entity_pipeline(r)
 
 	r.nodes = pool.make(Node, MAX_ENTITY_COUNT) or_return
-	r.meshes = glist.make(Mesh, MAX_MESH_COUNT) or_return
-	r.materials = glist.make(Material, MAX_MATERIAL_COUNT) or_return
-	r.textures = glist.make(Texture, MAX_TEXTURE_COUNT) or_return
-	r.images = glist.make(^sdl.GPUTexture, MAX_IMAGE_COUNT) or_return
-	r.samplers = glist.make(^sdl.GPUSampler, MAX_SAMPLER_COUNT) or_return
 	return
 }
 
-load_glb :: proc(r: ^Renderer, file_name: string) {
-	file_path := filepath.join({constants.dist_dir, constants.shader_dir, file_name})
-
-	data, err := gltf.load_from_file(file_path)
-	if err != nil {
-		log.panicf("gltf load err: %v", err)
-	}
-	defer gltf.unload(data)
-
-	copy_cmd_buf := sdl.AcquireGPUCommandBuffer(r.gpu);sdl_err(copy_cmd_buf)
-	defer {ok := sdl.SubmitGPUCommandBuffer(copy_cmd_buf);sdl_err(ok)}
-
-	copy_pass := sdl.BeginGPUCopyPass(copy_cmd_buf)
-	defer sdl.EndGPUCopyPass(copy_pass)
-
-	for node, i in data.nodes {
-		node_name, has_name := node.name.?
-		if !has_name {
-			log.warnf(
-				"while loading %s, node at idx=%d has no name, skipping node...",
-				file_name,
-				i,
-			)
-			continue
-		}
-		mesh_idx, has_mesh := node.mesh.?
-		if !has_mesh {
-			// insert node with no mesh
-			continue
-		}
-
-		mesh := data.meshes[mesh_idx]
-		mesh_name, mesh_has_name := mesh.name
-		for primitive, i in mesh.primitives {
-			indices_idx, indices_ok := primitive.indices.?
-			if !indices_ok {
-				log.warnf(
-					"while loading %s, renderer only supports indexed meshes, mesh_name=%s, primitive_idx=%d, skipping primitive...",
-					file_name,
-					mesh.name,
-					i,
-				)
-				continue
-			}
-			vert_pos_idx, vert_pos_ok := primitive.attributes["POSITION"]
-			if !vert_pos_ok {
-				log.warnf(
-					"while loading %s, no vert positions found, mesh_name=%s, primitive_idx=%d, skipping primitive...",
-					file_name,
-					mesh.name,
-					i,
-				)
-				continue
-			}
-
-			indicies := gltf.buffer_slice(data, indices_idx).([]u16)
-			primitive.material
-		}
-	}
-
-	//cpy to gpu
-	// {
-	// 	transfer_buf := sdl.CreateGPUTransferBuffer(
-	// 		r.gpu,
-	// 		{usage = .UPLOAD, size = vertices_byte_size_u32 + indices_byte_size_u32},
-	// 	)
-	// 	transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(gpu, transfer_buf, false)
-	// 	mem.copy(transfer_mem, raw_data(vertices), vertices_byte_size)
-	// 	mem.copy(transfer_mem[vertices_byte_size:], raw_data(indices), indices_byte_size)
-	// 	sdl.UnmapGPUTransferBuffer(gpu, transfer_buf)
-
-
-	// 	sdl.UploadToGPUBuffer(
-	// 		copy_pass,
-	// 		{transfer_buffer = transfer_buf},
-	// 		{buffer = vertex_buf, size = vertices_byte_size_u32},
-	// 		false,
-	// 	)
-	// 	sdl.UploadToGPUBuffer(
-	// 		copy_pass,
-	// 		{transfer_buffer = transfer_buf, offset = vertices_byte_size_u32},
-	// 		{buffer = indices_buf, size = indices_byte_size_u32},
-	// 		false,
-	// 	)
-	// }
-
-
+start_copy_pass :: proc(r: ^Renderer) {
+	assert(r.copy_cmd_buf == nil)
+	assert(r.copy_pass == nil)
+	r.copy_cmd_buf = sdl.AcquireGPUCommandBuffer(r.gpu);sdl_err(copy_cmd_buf)
+	r.copy_pass = sdl.BeginGPUCopyPass(copy_cmd_buf)
 }
 
-load_texture :: proc(r: ^Renderer, file: string) -> (texture: ^sdl.GPUTexture) {
-	file_path := filepath.join({constants.dist_dir, constants.texture_dir, file_name})
-	file := os.open(file_path)
-	astc_header := astc.load()
+end_copy_pass :: proc(r: ^Renderer) {
+	assert(r.copy_cmd_buf != nil)
+	assert(r.copy_pass != nil)
+	sdl.EndGPUCopyPass(r.copy_pass)
+	r.copy_pass = nil
+	ok := sdl.SubmitGPUCommandBuffer(r.copy_cmd_buf);sdl_err(ok)
+	r.copy_cmd_buf = nil
+}
+
+load_mesh :: proc(r: ^Renderer, m: Mesh) -> (gpu_mesh: GPU_Mesh) {
+	assert(r.copy_pass != nil)
+	assert(r.copy_cmd_buf != nil)
+	idxs_size := len(m.idxs) * size_of(u16)
+	verts_size := len(m.verts) * size_of(Vertex_Data)
+
+	verts_size_u32 := u32(verts_size)
+	idxs_byte_size_u32 := u32(idxs_size)
+	gpu_mesh.vert_buf = sdl.CreateGPUBuffer(
+		r.gpu,
+		{usage = {.VERTEX}, size = verts_size_u32},
+	);sdl_err(gpu_mesh.vert_buf)
+	gpu_mesh.idx_buf = sdl.CreateGPUBuffer(
+		r.gpu,
+		{usage = {.INDEX}, size = idx_byte_size_u32},
+	);sdl_err(gpu_mesh.idx_buf)
+
+	transfer_buf := sdl.CreateGPUTransferBuffer(
+		r.gpu,
+		{usage = .UPLOAD, size = verts_size_u32 + idxs_byte_size_u32},
+	);sdl_err(transfer_buf)
+	transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
+		r.gpu,
+		transfer_buf,
+		false,
+	);sdl_err(transfer_mem)
+	mem.copy(transfer_mem, raw_data(m.verts), verts_size)
+	mem.copy(transfer_mem[verts_size:], raw_data(m.idxs), idxs_size)
+	sdl.UnmapGPUTransferBuffer(r.gpu, transfer_buf)
+	sdl.UploadToGPUBuffer(
+		r.copy_pass,
+		{transfer_buffer = transfer_buf},
+		{buffer = vert_buf, size = verts_size_u32},
+		false,
+	)
+	sdl.UploadToGPUBuffer(
+		r.copy_pass,
+		{transfer_buffer = transfer_buf, offset = verts_size_u32},
+		{buffer = idx_buf, size = idx_byte_size_u32},
+		false,
+	)
+	return
+}
+
+load_texture :: proc(r: ^Renderer, file_name: string) -> (texture: ^sdl.GPUTexture) {
+	temp_mem := runtime.default_temp_allocator_temp_begin()
+	defer runtime.default_temp_allocator_temp_end(temp_mem)
+
+	file_path := filepath.join(
+		{constants.dist_dir, constants.texture_dir, file_name},
+		allocator = context.temp_allocator,
+	)
+	file_path_cstring := strings.clone_to_cstring(file_path, allocator = context.temp_allocator)
+	surface := sdli.Load(file_path_cstring);sdl_err(surface)
+	defer sdl.DestroySurface(surface)
+	width := u32(surface.w)
+	height := u32(surface.h)
+
 	texture = sdl.CreateGPUTexture(
 		r.gpu,
 		{
-			format = .ASTC_4x4_UNORM,
+			type = .D2,
+			format = .R8G8B8A8_UNORM_SRGB,
 			usage = {.SAMPLER},
-			width = u32(surface.w),
-			height = u32(surface.h),
+			width = width,
+			height = height,
 			layer_count_or_depth = 1,
 			num_levels = 1,
 		},
 	);sdl_err(texture)
-	return
-}
-
-
-load_vert_buf :: proc(r: ^Renderer, vert_data: []Vertex_Data) -> (vert_buf: ^sdl.GPUBuffer) {
-	// vertices := []Vertex_Data {
-	// 	{pos = {-0.5, 0.5, 0}, color = {1, 0, 0, 1}}, // tl
-	// 	{pos = {0.5, 0.5, 0}, color = {0, 1, 1, 1}}, // tr
-	// 	{pos = {-0.5, -0.5, 0}, color = {0, 1, 0, 1}}, // bl
-	// 	{pos = {0.5, -0.5, 0}, color = {1, 1, 0, 1}}, // br
-	// }
-	vertices_byte_size := len(vert_data) * size_of(Vertex_Data)
-	vertices_byte_size_u32 := u32(vertices_byte_size)
-	vert_buf = sdl.CreateGPUBuffer(r.gpu, {usage = {.VERTEX}, size = vertices_byte_size_u32})
-	return
-}
-
-load_idx_buf :: proc(r: ^Renderer, indices: []u16) -> (idx_buf: ^sdl.GPUBuffer) {
-	// indices := []u16{0, 1, 2, 2, 1, 3}
-	indices_len := len(indices)
-	indices_len_u32 := u32(indices_len)
-	indices_byte_size := indices_len * size_of(u16)
-	indices_byte_size_u32 := u32(indices_byte_size)
-	indices_buf := sdl.CreateGPUBuffer(r.gpu, {usage = {.INDEX}, size = indices_byte_size_u32})
+	len_pixels := surface.w * surface.h * 4
+	len_pixels_u32 := u32(len_pixels)
+	tex_transfer_buf := sdl.CreateGPUTransferBuffer(
+		r.gpu,
+		{usage = .UPLOAD, size = len_pixels_u32},
+	);sdl_err(tex_transfer_buf)
+	tex_transfer_mem := sdl.MapGPUTransferBuffer(
+		r.gpu,
+		tex_transfer_buf,
+		false,
+	);sdl_err(tex_transfer_mem)
+	mem.copy(tex_transfer_mem, surface.pixels, len_pixels)
+	sdl.UnmapGPUTransferBuffer(r.gpu, tex_transfer_buf)
+	sdl.UploadToGPUTexture(
+		r.copy_pass,
+		{transfer_buffer = tex_transfer_buf},
+		{texture = texture, w = width, h = height, d = 1},
+		false,
+	)
 	return
 }
 
