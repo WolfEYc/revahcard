@@ -1,6 +1,5 @@
 package renderer
 
-import "../constants"
 import "../lib/glist"
 import "../lib/pool"
 import sdl "vendor:sdl3"
@@ -14,6 +13,12 @@ import os "core:os/os2"
 import "core:path/filepath"
 import "core:strings"
 
+shader_dir :: "shaders"
+dist_dir :: "dist"
+out_shader_ext :: "spv"
+target_env :: "vulkan1.4"
+texture_dir :: "textures"
+
 sdl_ok_panic :: proc(ok: bool) {
 	if !ok do log.panicf("SDL Error: {}", sdl.GetError())
 }
@@ -26,23 +31,25 @@ sdl_err :: proc {
 	sdl_nil_panic,
 }
 
-MAX_BLOCK_COUNT :: 4096
+MAX_NODE_COUNT :: 4096
 
 Renderer :: struct {
 	gpu:          ^sdl.GPUDevice,
 	window:       ^sdl.Window,
 	pipeline:     ^sdl.GPUGraphicsPipeline,
-	blocks:       pool.Pool(Node),
+	nodes:        pool.Pool(Node),
+	meshes:       glist.Glist(GPU_Mesh),
+	textures:     glist.Glist(GPU_Material),
 	copy_cmd_buf: ^sdl.GPUCommandBuffer,
 	copy_pass:    ^sdl.GPUCopyPass,
 }
 
 Node :: struct {
 	mat:      matrix[4, 4]f32,
+	mesh:     glist.Glist_Idx,
+	mat:      glist.Glist_Idx,
 	children: []pool.Pool_Key,
 }
-
-// figure out card rendering
 
 Vertex_Data :: struct {
 	pos: [3]f32,
@@ -57,6 +64,9 @@ Mesh :: struct {
 GPU_Mesh :: struct {
 	vert_buf: ^sdl.GPUBuffer,
 	idx_buf:  ^sdl.GPUBuffer,
+}
+GPU_Material :: struct {
+	base: sdl.GPUTextureSamplerBinding,
 }
 
 @(private)
@@ -109,15 +119,15 @@ new :: proc(
 
 	r.pipeline = make_entity_pipeline(r)
 
-	r.nodes = pool.make(Node, MAX_ENTITY_COUNT) or_return
+	r.nodes = pool.make(Node, MAX_NODE_COUNT) or_return
 	return
 }
 
 start_copy_pass :: proc(r: ^Renderer) {
 	assert(r.copy_cmd_buf == nil)
 	assert(r.copy_pass == nil)
-	r.copy_cmd_buf = sdl.AcquireGPUCommandBuffer(r.gpu);sdl_err(copy_cmd_buf)
-	r.copy_pass = sdl.BeginGPUCopyPass(copy_cmd_buf)
+	r.copy_cmd_buf = sdl.AcquireGPUCommandBuffer(r.gpu);sdl_err(r.copy_cmd_buf)
+	r.copy_pass = sdl.BeginGPUCopyPass(r.copy_cmd_buf)
 }
 
 end_copy_pass :: proc(r: ^Renderer) {
@@ -129,14 +139,19 @@ end_copy_pass :: proc(r: ^Renderer) {
 	r.copy_cmd_buf = nil
 }
 
-load_mesh :: proc(r: ^Renderer, m: Mesh) -> (gpu_mesh: GPU_Mesh) {
+load_mesh :: proc(r: ^Renderer, file_name: string) -> (gpu_mesh: GPU_Mesh) {
 	assert(r.copy_pass != nil)
 	assert(r.copy_cmd_buf != nil)
+	temp_mem := runtime.default_temp_allocator_temp_begin()
+	defer runtime.default_temp_allocator_temp_end(temp_mem)
+
+	obj := obj_load(file_name)
+	m := obj_to_mesh(obj)
 	idxs_size := len(m.idxs) * size_of(u16)
 	verts_size := len(m.verts) * size_of(Vertex_Data)
 
 	verts_size_u32 := u32(verts_size)
-	idxs_byte_size_u32 := u32(idxs_size)
+	idx_byte_size_u32 := u32(idxs_size)
 	gpu_mesh.vert_buf = sdl.CreateGPUBuffer(
 		r.gpu,
 		{usage = {.VERTEX}, size = verts_size_u32},
@@ -161,24 +176,24 @@ load_mesh :: proc(r: ^Renderer, m: Mesh) -> (gpu_mesh: GPU_Mesh) {
 	sdl.UploadToGPUBuffer(
 		r.copy_pass,
 		{transfer_buffer = transfer_buf},
-		{buffer = vert_buf, size = verts_size_u32},
+		{buffer = gpu_mesh.vert_buf, size = verts_size_u32},
 		false,
 	)
 	sdl.UploadToGPUBuffer(
 		r.copy_pass,
 		{transfer_buffer = transfer_buf, offset = verts_size_u32},
-		{buffer = idx_buf, size = idx_byte_size_u32},
+		{buffer = gpu_mesh.idx_buf, size = idx_byte_size_u32},
 		false,
 	)
 	return
 }
 
-load_texture :: proc(r: ^Renderer, file_name: string) -> (texture: ^sdl.GPUTexture) {
+load_texture :: proc(r: ^Renderer, file_name: string) -> (tex: sdl.GPUTextureSamplerBinding) {
 	temp_mem := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
 
 	file_path := filepath.join(
-		{constants.dist_dir, constants.texture_dir, file_name},
+		{dist_dir, texture_dir, file_name},
 		allocator = context.temp_allocator,
 	)
 	file_path_cstring := strings.clone_to_cstring(file_path, allocator = context.temp_allocator)
@@ -187,7 +202,7 @@ load_texture :: proc(r: ^Renderer, file_name: string) -> (texture: ^sdl.GPUTextu
 	width := u32(surface.w)
 	height := u32(surface.h)
 
-	texture = sdl.CreateGPUTexture(
+	tex.texture = sdl.CreateGPUTexture(
 		r.gpu,
 		{
 			type = .D2,
@@ -198,7 +213,7 @@ load_texture :: proc(r: ^Renderer, file_name: string) -> (texture: ^sdl.GPUTextu
 			layer_count_or_depth = 1,
 			num_levels = 1,
 		},
-	);sdl_err(texture)
+	);sdl_err(mat.texture)
 	len_pixels := surface.w * surface.h * 4
 	len_pixels_u32 := u32(len_pixels)
 	tex_transfer_buf := sdl.CreateGPUTransferBuffer(
@@ -218,6 +233,7 @@ load_texture :: proc(r: ^Renderer, file_name: string) -> (texture: ^sdl.GPUTextu
 		{texture = texture, w = width, h = height, d = 1},
 		false,
 	)
+	tex.sampler = sdl.CreateGPUSampler(r.gpu, {});sdl_err(tex.sampler)
 	return
 }
 
