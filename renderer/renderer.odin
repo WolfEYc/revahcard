@@ -31,7 +31,9 @@ sdl_err :: proc {
 	sdl_nil_panic,
 }
 
-MAX_NODE_COUNT :: 4096
+MAX_NODE_COUNT :: 65536
+MAX_MESH_COUNT :: 1024
+MAX_MATERIAL_COUNT :: 1024
 
 Renderer :: struct {
 	gpu:          ^sdl.GPUDevice,
@@ -39,31 +41,28 @@ Renderer :: struct {
 	pipeline:     ^sdl.GPUGraphicsPipeline,
 	nodes:        pool.Pool(Node),
 	meshes:       glist.Glist(GPU_Mesh),
-	textures:     glist.Glist(GPU_Material),
+	materials:    glist.Glist(GPU_Material),
 	copy_cmd_buf: ^sdl.GPUCommandBuffer,
 	copy_pass:    ^sdl.GPUCopyPass,
+	proj_mat:     matrix[4, 4]f32,
+	view_mat:     matrix[4, 4]f32,
+	//            material   mesh     node
+	render_map:   [dynamic][dynamic][dynamic]pool.Pool_Key,
 }
 
 Node :: struct {
-	mat:      matrix[4, 4]f32,
-	mesh:     glist.Glist_Idx,
-	mat:      glist.Glist_Idx,
-	children: []pool.Pool_Key,
-}
+	parent:           pool.Pool_Key,
+	local_transform:  matrix[4, 4]f32,
 
-Vertex_Data :: struct {
-	pos: [3]f32,
-	uv:  [2]f32,
-}
-
-Mesh :: struct {
-	verts: []Vertex_Data,
-	idxs:  []u16,
+	// computed at render time
+	visited:          bool,
+	global_transform: matrix[4, 4]f32,
 }
 
 GPU_Mesh :: struct {
 	vert_buf: ^sdl.GPUBuffer,
 	idx_buf:  ^sdl.GPUBuffer,
+	num_idxs: u32,
 }
 GPU_Material :: struct {
 	base: sdl.GPUTextureSamplerBinding,
@@ -72,7 +71,7 @@ GPU_Material :: struct {
 @(private)
 make_entity_pipeline :: proc(r: Renderer) -> (pipeline: ^sdl.GPUGraphicsPipeline) {
 	vert_shader := load_shader(r.gpu, "default.spv.vert", {uniform_buffers = 1})
-	frag_shader := load_shader(r.gpu, "default.spv.frag", {})
+	frag_shader := load_shader(r.gpu, "default.spv.frag", {uniform_buffers = 1})
 
 	vertex_attrs := []sdl.GPUVertexAttribute {
 		{location = 0, format = .FLOAT3, offset = u32(offset_of(Vertex_Data, pos))},
@@ -106,9 +105,22 @@ make_entity_pipeline :: proc(r: Renderer) -> (pipeline: ^sdl.GPUGraphicsPipeline
 	return
 }
 
+Camera_Settings :: struct {
+	fovy: f32,
+	near: f32,
+	far:  f32,
+}
+
+default_cam :: Camera_Settings {
+	fovy = 90,
+	near = 0.0001,
+	far  = 1000,
+}
+
 new :: proc(
 	gpu: ^sdl.GPUDevice,
 	window: ^sdl.Window,
+	cam: Camera_Settings = default_cam,
 ) -> (
 	r: Renderer,
 	err: runtime.Allocator_Error,
@@ -120,6 +132,13 @@ new :: proc(
 	r.pipeline = make_entity_pipeline(r)
 
 	r.nodes = pool.make(Node, MAX_NODE_COUNT) or_return
+	r.meshes = glist.make(GPU_Mesh, MAX_MESH_COUNT) or_return
+	r.materials = glist.make(GPU_Material, MAX_MATERIAL_COUNT) or_return
+
+	win_size: [2]i32
+	ok = sdl.GetWindowSize(window, &win_size.x, &win_size.y);sdl_err(ok)
+	aspect := f32(win_size.x) / f32(win_size.y)
+	r.proj_mat = lal.matrix4_perspective_f32(lal.to_radians(cam.fovy), aspect, cam.near, cam.far)
 	return
 }
 
@@ -145,10 +164,9 @@ load_mesh :: proc(r: ^Renderer, file_name: string) -> (gpu_mesh: GPU_Mesh) {
 	temp_mem := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
 
-	obj := obj_load(file_name)
-	m := obj_to_mesh(obj)
-	idxs_size := len(m.idxs) * size_of(u16)
-	verts_size := len(m.verts) * size_of(Vertex_Data)
+	mesh := obj_load(file_name)
+	idxs_size := len(mesh.idxs) * size_of(u16)
+	verts_size := len(mesh.verts) * size_of(Vertex_Data)
 
 	verts_size_u32 := u32(verts_size)
 	idx_byte_size_u32 := u32(idxs_size)
@@ -163,15 +181,15 @@ load_mesh :: proc(r: ^Renderer, file_name: string) -> (gpu_mesh: GPU_Mesh) {
 
 	transfer_buf := sdl.CreateGPUTransferBuffer(
 		r.gpu,
-		{usage = .UPLOAD, size = verts_size_u32 + idxs_byte_size_u32},
+		{usage = .UPLOAD, size = verts_size_u32 + idx_byte_size_u32},
 	);sdl_err(transfer_buf)
 	transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
 		r.gpu,
 		transfer_buf,
 		false,
 	);sdl_err(transfer_mem)
-	mem.copy(transfer_mem, raw_data(m.verts), verts_size)
-	mem.copy(transfer_mem[verts_size:], raw_data(m.idxs), idxs_size)
+	mem.copy(transfer_mem, raw_data(mesh.verts), verts_size)
+	mem.copy(transfer_mem[verts_size:], raw_data(mesh.idxs), idxs_size)
 	sdl.UnmapGPUTransferBuffer(r.gpu, transfer_buf)
 	sdl.UploadToGPUBuffer(
 		r.copy_pass,
@@ -213,8 +231,8 @@ load_texture :: proc(r: ^Renderer, file_name: string) -> (tex: sdl.GPUTextureSam
 			layer_count_or_depth = 1,
 			num_levels = 1,
 		},
-	);sdl_err(mat.texture)
-	len_pixels := surface.w * surface.h * 4
+	);sdl_err(tex.texture)
+	len_pixels := int(surface.w * surface.h * 4)
 	len_pixels_u32 := u32(len_pixels)
 	tex_transfer_buf := sdl.CreateGPUTransferBuffer(
 		r.gpu,
@@ -230,10 +248,79 @@ load_texture :: proc(r: ^Renderer, file_name: string) -> (tex: sdl.GPUTextureSam
 	sdl.UploadToGPUTexture(
 		r.copy_pass,
 		{transfer_buffer = tex_transfer_buf},
-		{texture = texture, w = width, h = height, d = 1},
+		{texture = tex.texture, w = width, h = height, d = 1},
 		false,
 	)
 	tex.sampler = sdl.CreateGPUSampler(r.gpu, {});sdl_err(tex.sampler)
 	return
+}
+
+MAX_DYNAMIC_BATCH :: 64
+render :: proc(r: ^Renderer) {
+	Mvp_Ubo :: struct {
+		mvps: [MAX_DYNAMIC_BATCH]matrix[4, 4]f32,
+	}
+	mvp_ubo: Mvp_Ubo
+
+	cmd_buf := sdl.AcquireGPUCommandBuffer(r.gpu);sdl_err(cmd_buf)
+	defer {ok := sdl.SubmitGPUCommandBuffer(cmd_buf);sdl_err(ok)}
+
+	swapchain_tex: ^sdl.GPUTexture
+	ok := sdl.WaitAndAcquireGPUSwapchainTexture(
+		cmd_buf,
+		r.window,
+		&swapchain_tex,
+		nil,
+		nil,
+	);sdl_err(ok)
+	if swapchain_tex == nil do return
+
+	color_target := sdl.GPUColorTargetInfo {
+		texture     = swapchain_tex,
+		load_op     = .CLEAR,
+		clear_color = {0, 0, 0, 0},
+		store_op    = .STORE,
+	}
+	render_pass := sdl.BeginGPURenderPass(cmd_buf, &color_target, 1, nil)
+	defer sdl.EndGPURenderPass(render_pass)
+	sdl.BindGPUGraphicsPipeline(render_pass, r.pipeline)
+	vp := r.proj_mat * r.view_mat
+
+	// draw
+	for material_meshes, material_idx in r.render_map {
+		if len(material_meshes) == 0 do continue
+
+		material := glist.get(&r.materials, glist.Glist_Idx(material_idx))
+		sdl.BindGPUFragmentSamplers(render_pass, 0, &(material.base), 1)
+		for mesh_nodes, mesh_idx in material_meshes {
+			num_instances := u32(len(mesh_nodes))
+			if num_instances == 0 do continue
+			//TODO if num_instances > MAX_DYNAMIC_BATCH gotta looperino
+
+			for node_key, instance_idx in mesh_nodes {
+				node, ok := pool.get(&r.nodes, node_key);assert(ok)
+				mvp_ubo.mvps[instance_idx] = vp * node.global_transform
+			}
+			mesh := glist.get(&r.meshes, glist.Glist_Idx(mesh_idx))
+			sdl.PushGPUVertexUniformData(
+				cmd_buf,
+				0,
+				&(mvp_ubo),
+				size_of(r.proj_mat) * num_instances,
+			)
+			sdl.BindGPUVertexBuffers(
+				render_pass,
+				0,
+				&(sdl.GPUBufferBinding{buffer = mesh.vert_buf}),
+				1,
+			)
+			sdl.BindGPUIndexBuffer(
+				render_pass,
+				sdl.GPUBufferBinding{buffer = mesh.idx_buf},
+				._16BIT,
+			)
+			sdl.DrawGPUIndexedPrimitives(render_pass, mesh.num_idxs, num_instances, 0, 0, 0)
+		}
+	}
 }
 

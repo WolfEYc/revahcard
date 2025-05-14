@@ -24,18 +24,10 @@ Pool :: struct($T: typeid) {
 	_insert_buf_len:  Pool_Idx,
 	_max_active_len:  Pool_Idx, // useful for not wasting iterating into the inactive only entities range
 	_num_actives:     Pool_Idx,
-	_entity_free_cb:  proc(entity: T),
 }
 
 
-make :: proc(
-	$T: typeid,
-	cap: Pool_Idx,
-	entity_free_cb: proc(entity: T) = proc(entity: T) {},
-) -> (
-	pool: Pool(T),
-	err: runtime.Allocator_Error,
-) {
+make :: proc($T: typeid, cap: Pool_Idx) -> (pool: Pool(T), err: runtime.Allocator_Error) {
 	Entity_Elem :: struct {
 		entity:     T,
 		actives:    bool,
@@ -46,10 +38,9 @@ make :: proc(
 	}
 	Entity_SOA :: #soa[]Entity_Elem
 	pool_mem: Entity_SOA
-	pool_mem = runtime.make(Entity_SOA, cap) or_return
-	pool._entities, pool._actives, pool._gens, pool._vacant_min_heap, pool._free_buf, pool._insert_buf :=
+	pool_mem = make(Entity_SOA, cap) or_return
+	pool._entities, pool._actives, pool._gens, pool._vacant_min_heap, pool._free_buf, pool._insert_buf =
 		soa_unzip(pool_mem)
-	pool._entity_free_cb = entity_free_cb
 }
 
 
@@ -102,7 +93,6 @@ free :: #force_inline proc(pool: ^Pool($T), idx: Pool_Idx) #no_bounds_check {
 	pool._actives[idx] = false
 	pool._vacant_min_heap[len(pool._entities) - 1] = idx
 	heap.push(pool._vacant_min_heap, min_heap_less)
-	pool._entity_free_cb(pool._entities[idx])
 }
 
 free_immediate :: proc(pool: ^Pool($T), key: Pool_Key) #no_bounds_check {
