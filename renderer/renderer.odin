@@ -6,6 +6,7 @@ import sdl "vendor:sdl3"
 import sdli "vendor:sdl3/image"
 
 import "base:runtime"
+import "core:encoding/json"
 import "core:log"
 import lal "core:math/linalg"
 import "core:mem"
@@ -18,6 +19,10 @@ dist_dir :: "dist"
 out_shader_ext :: "spv"
 target_env :: "vulkan1.4"
 texture_dir :: "textures"
+model_dir :: "models"
+material_dir :: "materials"
+materials_dist_dir :: dist_dir + os.Path_Separator_String + material_dir
+models_dist_dir :: dist_dir + os.Path_Separator_String + model_dir
 
 sdl_ok_panic :: proc(ok: bool) {
 	if !ok do log.panicf("SDL Error: {}", sdl.GetError())
@@ -36,23 +41,27 @@ MAX_MESH_COUNT :: 1024
 MAX_MATERIAL_COUNT :: 1024
 
 Renderer :: struct {
-	gpu:          ^sdl.GPUDevice,
-	window:       ^sdl.Window,
-	pipeline:     ^sdl.GPUGraphicsPipeline,
-	nodes:        pool.Pool(Node),
-	meshes:       glist.Glist(GPU_Mesh),
-	materials:    glist.Glist(GPU_Material),
-	copy_cmd_buf: ^sdl.GPUCommandBuffer,
-	copy_pass:    ^sdl.GPUCopyPass,
-	proj_mat:     matrix[4, 4]f32,
-	view_mat:     matrix[4, 4]f32,
+	gpu:              ^sdl.GPUDevice,
+	window:           ^sdl.Window,
+	pipeline:         ^sdl.GPUGraphicsPipeline,
+	nodes:            pool.Pool(Node),
+	meshes:           glist.Glist(GPU_Mesh),
+	materials:        glist.Glist(GPU_Material),
+	mesh_catalog:     map[string]glist.Glist_Idx,
+	material_catalog: map[string]glist.Glist_Idx,
+	copy_cmd_buf:     ^sdl.GPUCommandBuffer,
+	copy_pass:        ^sdl.GPUCopyPass,
+	proj_mat:         matrix[4, 4]f32,
+	view_mat:         matrix[4, 4]f32,
 	//            material   mesh     node
-	render_map:   [dynamic][dynamic][dynamic]pool.Pool_Key,
+	render_map:       [dynamic][dynamic][dynamic]pool.Pool_Key,
 }
 
 Node :: struct {
 	parent:           pool.Pool_Key,
 	local_transform:  matrix[4, 4]f32,
+	mesh:             glist.Glist_Idx,
+	material:         glist.Glist_Idx,
 
 	// computed at render time
 	visited:          bool,
@@ -111,7 +120,7 @@ Camera_Settings :: struct {
 	far:  f32,
 }
 
-default_cam :: Camera_Settings {
+DEFAULT_CAM :: Camera_Settings {
 	fovy = 90,
 	near = 0.0001,
 	far  = 1000,
@@ -120,7 +129,7 @@ default_cam :: Camera_Settings {
 new :: proc(
 	gpu: ^sdl.GPUDevice,
 	window: ^sdl.Window,
-	cam: Camera_Settings = default_cam,
+	cam: Camera_Settings = DEFAULT_CAM,
 ) -> (
 	r: Renderer,
 	err: runtime.Allocator_Error,
@@ -134,6 +143,8 @@ new :: proc(
 	r.nodes = pool.make(Node, MAX_NODE_COUNT) or_return
 	r.meshes = glist.make(GPU_Mesh, MAX_MESH_COUNT) or_return
 	r.materials = glist.make(GPU_Material, MAX_MATERIAL_COUNT) or_return
+	r.mesh_catalog = make(map[string]glist.Glist_Idx)
+	r.material_catalog = make(map[string]glist.Glist_Idx)
 
 	win_size: [2]i32
 	ok = sdl.GetWindowSize(window, &win_size.x, &win_size.y);sdl_err(ok)
@@ -158,7 +169,16 @@ end_copy_pass :: proc(r: ^Renderer) {
 	r.copy_cmd_buf = nil
 }
 
-load_mesh :: proc(r: ^Renderer, file_name: string) -> (gpu_mesh: GPU_Mesh) {
+load_all_assets :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
+	start_copy_pass(r)
+	load_all_materials(r) or_return
+	load_all_meshes(r) or_return
+	end_copy_pass(r)
+	return
+}
+
+@(private)
+load_mesh :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Error) {
 	assert(r.copy_pass != nil)
 	assert(r.copy_cmd_buf != nil)
 	temp_mem := runtime.default_temp_allocator_temp_begin()
@@ -170,6 +190,7 @@ load_mesh :: proc(r: ^Renderer, file_name: string) -> (gpu_mesh: GPU_Mesh) {
 
 	verts_size_u32 := u32(verts_size)
 	idx_byte_size_u32 := u32(idxs_size)
+	gpu_mesh: GPU_Mesh
 	gpu_mesh.vert_buf = sdl.CreateGPUBuffer(
 		r.gpu,
 		{usage = {.VERTEX}, size = verts_size_u32},
@@ -178,6 +199,8 @@ load_mesh :: proc(r: ^Renderer, file_name: string) -> (gpu_mesh: GPU_Mesh) {
 		r.gpu,
 		{usage = {.INDEX}, size = idx_byte_size_u32},
 	);sdl_err(gpu_mesh.idx_buf)
+	idx := glist.insert(&r.meshes, gpu_mesh) or_return
+	r.mesh_catalog[file_name] = idx
 
 	transfer_buf := sdl.CreateGPUTransferBuffer(
 		r.gpu,
@@ -206,6 +229,20 @@ load_mesh :: proc(r: ^Renderer, file_name: string) -> (gpu_mesh: GPU_Mesh) {
 	return
 }
 
+load_all_meshes :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
+	f, ferr := os.open(models_dist_dir)
+	if err != nil {
+		log.fatalf("err in opening materials dist dir to load all materials, reason: %v", ferr)
+	}
+	it := os.read_directory_iterator_create(f)
+	for file_info in os.read_directory_iterator(&it) {
+		load_mesh(r, file_info.name) or_return
+	}
+	os.read_directory_iterator_destroy(&it)
+	return
+}
+
+@(private)
 load_texture :: proc(r: ^Renderer, file_name: string) -> (tex: sdl.GPUTextureSamplerBinding) {
 	temp_mem := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
@@ -255,6 +292,86 @@ load_texture :: proc(r: ^Renderer, file_name: string) -> (tex: sdl.GPUTextureSam
 	return
 }
 
+Material_Meta :: struct {
+	base: string `json:"base"`,
+}
+
+@(private)
+load_material :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Error) {
+	temp_mem := runtime.default_temp_allocator_temp_begin()
+	defer runtime.default_temp_allocator_temp_end(temp_mem)
+
+	file_path := filepath.join(
+		{dist_dir, model_dir, file_name},
+		allocator = context.temp_allocator,
+	)
+	data, file_err := os.read_entire_file_from_path(file_path, allocator = context.temp_allocator)
+	if file_err.(runtime.Allocator_Error) != .None {
+		err = file_err.(runtime.Allocator_Error)
+		return
+	}
+	if file_err != nil {
+		log.panicf("err in loading material %s reason: %v", file_name, err)
+	}
+
+	meta: Material_Meta
+	unmarshal_err := json.unmarshal(data, &meta, allocator = context.temp_allocator)
+	if unmarshal_err != nil {
+		log.fatalf("failed to unmarshal model meta json, %s, reason: %v", file_name, unmarshal_err)
+	}
+
+
+	material: GPU_Material
+	material.base = load_texture(r, meta.base)
+
+	idx := glist.insert(&r.materials, material) or_return
+	r.material_catalog[file_name] = idx
+	return
+}
+
+load_all_materials :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
+	f, ferr := os.open(materials_dist_dir)
+	if err != nil {
+		log.fatalf("err in opening materials dist dir to load all materials, reason: %v", ferr)
+	}
+	it := os.read_directory_iterator_create(f)
+	for file_info in os.read_directory_iterator(&it) {
+		load_material(r, file_info.name) or_return
+	}
+	os.read_directory_iterator_destroy(&it)
+	return
+}
+
+insert_node_defered :: proc(
+	r: ^Renderer,
+	n: Node,
+) -> (
+	key: pool.Pool_Key,
+	err: runtime.Allocator_Error,
+) {
+	key = pool.insert_defered(&r.nodes, n) or_return
+	return
+}
+
+@(private)
+flush_node_inserts :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
+	pending_inserts := pool.pending_inserts(&r.nodes)
+	pool.flush_inserts(&r.nodes)
+	for n_idx in pending_inserts {
+		n_key := pool.idx_to_key(&r.nodes, n_idx)
+		n, ok := pool.get(&r.nodes, n_key)
+		if !ok do continue
+		if n.material >= u32(len(r.render_map)) {
+			resize(&r.render_map, n.material + 1) or_return
+		}
+		if n.mesh >= u32(len(r.render_map[n.material])) {
+			resize(&r.render_map[n.material], n.mesh + 1) or_return
+		}
+		append(&r.render_map[n.material][n.mesh], n_key) or_return
+	}
+	return
+}
+
 MAX_DYNAMIC_BATCH :: 64
 render :: proc(r: ^Renderer) {
 	Mvp_Ubo :: struct {
@@ -286,6 +403,7 @@ render :: proc(r: ^Renderer) {
 	sdl.BindGPUGraphicsPipeline(render_pass, r.pipeline)
 	vp := r.proj_mat * r.view_mat
 
+	flush_node_inserts(r)
 	// draw
 	for material_meshes, material_idx in r.render_map {
 		if len(material_meshes) == 0 do continue

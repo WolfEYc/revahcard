@@ -24,7 +24,7 @@ Vertex_Data :: struct {
 }
 obj_load :: proc(file_name: string) -> (mesh: Mesh) {
 	file_path := filepath.join(
-		{dist_dir, shader_dir, file_name},
+		{dist_dir, model_dir, file_name},
 		allocator = context.temp_allocator,
 	)
 	f, err := os.open(file_path)

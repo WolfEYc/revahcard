@@ -167,7 +167,7 @@ insert_defered :: proc(
 		err = runtime.Allocator_Error.Invalid_Pointer
 		return
 	}
-	if pool._vacant_len == 0 && pool._max_used_len == len(pool._entities) {
+	if pool._vacant_len == 0 && pool._max_used_len == u32(len(pool._entities)) {
 		err = runtime.Allocator_Error.Out_Of_Memory
 		return
 	}
@@ -196,6 +196,17 @@ insert_defered :: proc(
 		pool._insert_buf[pool._insert_buf_len] = key.idx
 		pool._insert_buf_len += 1
 	}
+	return
+}
+
+pending_inserts :: #force_inline proc(pool: ^Pool($T)) -> []Pool_Idx {
+	return pool._insert_buf[:pool._insert_buf_len]
+}
+
+idx_to_key :: #force_inline proc(pool: ^Pool($T), idx: Pool_Idx) -> (key: Pool_Key) {
+	key.idx = idx
+	key.gen = pool._gens[idx]
+	return
 }
 
 flush_inserts :: proc(pool: ^Pool($T)) #no_bounds_check {
