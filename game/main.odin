@@ -1,5 +1,6 @@
 package main
 
+import "../lib/sdle"
 import "../renderer"
 import "core:log"
 import lal "core:math/linalg"
@@ -14,15 +15,20 @@ main :: proc() {
 	}
 
 	// init sdl
-	ok := sdl.Init({.VIDEO});renderer.sdl_err(ok)
+	ok := sdl.Init({.VIDEO});sdle.sdl_err(ok)
 
-	gpu := sdl.CreateGPUDevice({.SPIRV}, true, "vulkan");renderer.sdl_err(gpu)
+	gpu := sdl.CreateGPUDevice({.SPIRV}, true, "vulkan");sdle.sdl_err(gpu)
 	window := sdl.CreateWindow(
 		"Hello Triangle SDL3 Yay",
 		1920,
 		1080,
 		{.FULLSCREEN},
-	);renderer.sdl_err(window)
+	);sdle.sdl_err(window)
+	r, err := renderer.new(gpu, window)
+	if err != nil do log.panic(err)
+	err = renderer.load_all_assets(&r)
+	if err != nil do log.panic(err)
+
 	last_ticks := sdl.GetTicks()
 	main_loop: for {
 		new_ticks := sdl.GetTicks()
@@ -41,7 +47,7 @@ main :: proc() {
 		// update game state
 
 		// render
-
+		renderer.render(&r)
 	}
 }
 

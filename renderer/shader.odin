@@ -1,5 +1,6 @@
 package renderer
 
+import "../lib/sdle"
 import "base:runtime"
 import "core:encoding/json"
 import "core:log"
@@ -40,7 +41,7 @@ load_shader :: proc(
 	input_path := filepath.join({shader_dir, input_name}, allocator = context.temp_allocator)
 	input_stat, in_stat_err := os.stat(input_path, allocator = context.temp_allocator)
 	output_path := filepath.join({dist_dir, shader_dir, file_name}, context.temp_allocator)
-	out_file_info, out_stat_err := os.stat(file_path, context.temp_allocator)
+	out_file_info, out_stat_err := os.stat(output_path, context.temp_allocator)
 
 	if out_stat_err != nil && in_stat_err != nil {
 		log.panicf(
@@ -57,7 +58,10 @@ load_shader :: proc(
 		compile_shader(input_path, output_path)
 	}
 
-	out_code, read_err := os.read_entire_file(output_path, allocator = context.temp_allocator)
+	out_code, read_err := os.read_entire_file_from_path(
+		output_path,
+		allocator = context.temp_allocator,
+	)
 	if read_err != nil {
 		log.panicf("failed to read shader: %v reason: %v", file_name, read_err)
 	}
@@ -65,8 +69,8 @@ load_shader :: proc(
 	shader = sdl.CreateGPUShader(
 		device,
 		{
-			code_size = len(code),
-			code = raw_data(code),
+			code_size = len(out_code),
+			code = raw_data(out_code),
 			entrypoint = "main",
 			format = {.SPIRV},
 			stage = stage,
@@ -75,7 +79,7 @@ load_shader :: proc(
 			num_storage_buffers = info.storage_buffers,
 			num_storage_textures = info.storage_textures,
 		},
-	);sdl_err(shader)
+	);sdle.sdl_err(shader)
 	return
 }
 
@@ -86,8 +90,7 @@ compile_shader :: proc(input_path: string, output_path: string) {
 	cmd_slice[2] = "-o"
 	cmd_slice[3] = output_path
 	cmd_slice[4] = "--target-env=" + target_env
-	process: os.Process
-	process, err = os.process_start({command = cmd_slice, stdout = os.stderr, stderr = os.stderr})
+	process, err := os.process_start({command = cmd_slice, stdout = os.stderr, stderr = os.stderr})
 	if err != nil {
 		log.panicf("failed to start glslc to compile shader, reason: %v", err)
 	}

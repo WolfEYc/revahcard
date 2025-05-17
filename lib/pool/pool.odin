@@ -38,9 +38,10 @@ make :: proc($T: typeid, cap: Pool_Idx) -> (pool: Pool(T), err: runtime.Allocato
 	}
 	Entity_SOA :: #soa[]Entity_Elem
 	pool_mem: Entity_SOA
-	pool_mem = make(Entity_SOA, cap) or_return
+	pool_mem = runtime.make(Entity_SOA, cap) or_return
 	pool._entities, pool._actives, pool._gens, pool._vacant_min_heap, pool._free_buf, pool._insert_buf =
 		soa_unzip(pool_mem)
+	return
 }
 
 
@@ -57,8 +58,9 @@ validate_idx :: #force_inline proc(pool: ^Pool($T), key: Pool_Key) -> bool #no_b
 @(require_results)
 get :: #force_inline proc(pool: ^Pool($T), key: Pool_Key) -> (res: ^T, ok: bool) #no_bounds_check {
 	if !validate_idx(pool, key) do return
-	res = &pool._entities[idx.idx]
+	res = &pool._entities[key.idx]
 	ok = true
+	return
 }
 
 next :: #force_inline proc(
@@ -108,7 +110,11 @@ free_defered :: #force_inline proc(pool: ^Pool($T), key: Pool_Key) #no_bounds_ch
 	pool._free_buf_len += 1
 }
 
+pending_frees :: #force_inline proc(pool: ^Pool($T)) -> []Pool_Idx {
+	return pool._free_buf[:pool._free_buf_len]
+}
 flush_frees :: proc(pool: ^Pool($T)) #no_bounds_check {
+	if pool._free_buf_len == 0 do return
 	for idx in pool._free_buf[:pool._free_buf_len] {
 		free(pool, idx)
 	}
@@ -210,6 +216,7 @@ idx_to_key :: #force_inline proc(pool: ^Pool($T), idx: Pool_Idx) -> (key: Pool_K
 }
 
 flush_inserts :: proc(pool: ^Pool($T)) #no_bounds_check {
+	if pool._insert_buf_len == 0 do return
 	for idx in pool._insert_buf[:pool._insert_buf_len] {
 		pool._actives[idx] = true
 		pool._max_active_len = max(pool._max_active_len, idx + 1)

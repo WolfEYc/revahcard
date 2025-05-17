@@ -1,5 +1,6 @@
 package glist
 
+import "base:builtin"
 import "base:runtime"
 
 Glist_Idx :: u32
@@ -16,6 +17,7 @@ Glist :: struct($T: typeid) {
 make :: proc($T: typeid, cap: Glist_Idx) -> (list: Glist(T), err: runtime.Allocator_Error) {
 	list._data = runtime.make([]T, cap) or_return
 	list._update_map = runtime.make(map[Glist_Idx]T, cap) or_return
+	return
 }
 
 insert :: #force_inline proc(
@@ -25,14 +27,18 @@ insert :: #force_inline proc(
 	idx: Glist_Idx,
 	err: runtime.Allocator_Error,
 ) #no_bounds_check {
-	if list._len == cap(list) do return runtime.Allocator_Error.Out_Of_Memory
+	if list._len == cap(list) {
+		err = runtime.Allocator_Error.Out_Of_Memory
+		return
+	}
 	list._data[list._len] = e
 	list._len += 1
+	return
 }
 
 get :: #force_inline proc(list: ^Glist($T), idx: Glist_Idx) -> (elem: ^T) #no_bounds_check {
 	assert(idx < list._len)
-	return list._data[idx]
+	return &list._data[idx]
 }
 
 update_deferred :: #force_inline proc(list: ^Glist($T), idx: Glist_Idx, e: T) #no_bounds_check {
@@ -52,6 +58,6 @@ len :: #force_inline proc(list: ^Glist($T)) -> (len: Glist_Idx) {
 }
 
 cap :: #force_inline proc(list: ^Glist($T)) -> (cap: Glist_Idx) {
-	return len(list._data)
+	return Glist_Idx(builtin.len(list._data))
 }
 
