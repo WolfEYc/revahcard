@@ -140,6 +140,7 @@ new :: proc(
 	ok = sdl.GetWindowSize(window, &win_size.x, &win_size.y);sdle.sdl_err(ok)
 	aspect := f32(win_size.x) / f32(win_size.y)
 	r.proj_mat = lal.matrix4_perspective_f32(lal.to_radians(cam.fovy), aspect, cam.near, cam.far)
+	r.view_mat = lal.MATRIX4F32_IDENTITY
 	return
 }
 
@@ -175,6 +176,13 @@ load_mesh :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
 	log.infof("loading mesh: %s", file_name)
 	mesh := obj_load(file_name)
+
+	// for v in mesh.verts {
+	// 	log.infof("%v", v)
+	// }
+	// for i := 0; i < len(mesh.idxs); i += 3 {
+	// 	log.infof("%d %d, %d", mesh.idxs[i], mesh.idxs[i + 1], mesh.idxs[i + 2])
+	// }
 
 	idxs_size := len(mesh.idxs) * size_of(u16)
 	verts_size := len(mesh.verts) * size_of(Vertex_Data)
@@ -267,7 +275,7 @@ load_texture :: proc(r: ^Renderer, file_name: string) -> (tex: sdl.GPUTextureSam
 		r.gpu,
 		{
 			type = .D2,
-			format = .R8G8B8A8_UNORM_SRGB,
+			format = .R8G8B8A8_UNORM,
 			usage = {.SAMPLER},
 			width = width,
 			height = height,
@@ -375,25 +383,25 @@ Make_Node_Params :: struct {
 	transform:     matrix[4, 4]f32,
 }
 
+
 make_node :: proc(
 	r: ^Renderer,
-	p: Make_Node_Params,
+	mesh_name: string,
+	material_name := "default",
+	parent := pool.Pool_Key{},
+	transform := lal.MATRIX4F32_IDENTITY,
 ) -> (
 	key: pool.Pool_Key,
 	err: Make_Node_Error,
 ) {
 	ok: bool
 	node: Node
-	node.parent = p.parent
-	node.local_transform = p.transform
-	node.mesh, ok = r.mesh_catalog[p.mesh_name]
+	node.parent = parent
+	node.local_transform = transform
+	node.mesh, ok = r.mesh_catalog[mesh_name]
 	if !ok {
 		err = .Mesh_Not_Found
 		return
-	}
-	material_name := p.material_name
-	if len(p.material_name) == 0 {
-		material_name = "default"
 	}
 	node.material, ok = r.material_catalog[material_name]
 	if !ok {
@@ -451,7 +459,7 @@ compute_node_transforms :: proc(r: ^Renderer) {
 		node._visited = true
 
 		cur := node
-		parent_transform: matrix[4, 4]f32
+		parent_transform := lal.MATRIX4F32_IDENTITY
 		for parent in next_node_parent(r, &cur) {
 			if parent._visited {
 				parent_transform = parent._global_transform
@@ -522,8 +530,22 @@ render :: proc(r: ^Renderer) {
 			for node_key, node_idx in mesh_nodes {
 				node, ok := pool.get(&r.nodes, node_key)
 				if !ok do continue
-				mvp_ubo.mvps[num_instances] = vp * node._global_transform
+				// log.infof("rendering node %d", node_idx)
+
 				num_instances += 1
+				screen_transform := vp * node._global_transform
+				log.infof("pos=%v", screen_transform * [4]f32{0, 0, 0, 1})
+				log.infof("rot=%v %v %v", lal.euler_angles_xyz_from_matrix4_f32(screen_transform))
+				get_scale_from_col_major_matrix :: proc(m: matrix[4, 4]f32) -> [3]f32 {
+					return {
+						lal.vector_length(m[0].xyz),
+						lal.vector_length(m[1].xyz),
+						lal.vector_length(m[2].xyz),
+					}
+				}
+
+				log.infof("scale=%v", get_scale_from_col_major_matrix(screen_transform))
+				mvp_ubo.mvps[num_instances] = screen_transform
 				if material == nil {
 					material = glist.get(&r.materials, glist.Glist_Idx(material_idx))
 					sdl.BindGPUFragmentSamplers(render_pass, 0, &(material.base), 1)

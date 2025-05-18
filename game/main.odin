@@ -31,7 +31,7 @@ main :: proc() {
 	if err != nil do log.panic(err)
 
 	// load some bananers
-	banana_node, node_err := renderer.make_node(&r, {mesh_name = "item-banana"})
+	banana_node, node_err := renderer.make_node(&r, "item-banana", transform = lal.matrix4_translate_f32({0, 0, -5}))
 	if node_err != nil do log.panic(node_err)
 	log.infof("banana_key=%v", banana_node)
 
