@@ -13,6 +13,7 @@ main :: proc() {
 	context.logger = log.create_console_logger()
 	when ODIN_DEBUG == true {
 		sdl.SetLogPriorities(.VERBOSE)
+		sdl.SetHint(sdl.HINT_RENDER_VULKAN_DEBUG, "1")
 	}
 
 	// init sdl
@@ -31,11 +32,11 @@ main :: proc() {
 	if err != nil do log.panic(err)
 
 	// load some bananers
-	banana_node, node_err := renderer.make_node(&r, "item-banana", transform = lal.matrix4_translate_f32({0, 0, -5}))
+	banana_key, node_err := renderer.make_node(&r, "item-banana", pos = {0, 0, -1})
 	if node_err != nil do log.panic(node_err)
-	log.infof("banana_key=%v", banana_node)
+	log.infof("banana_key=%v", banana_key)
 
-
+	renderer.flush_nodes(&r)
 	last_ticks := sdl.GetTicks()
 	main_loop: for {
 		new_ticks := sdl.GetTicks()
@@ -52,8 +53,22 @@ main :: proc() {
 			}
 		}
 		// update game state
+		banana, ok := pool.get(&r.nodes, banana_key);assert(ok)
+		x_rotation_amt := lal.to_radians(f32(45) * delta_time)
+		y_rotation_amt := lal.to_radians(f32(90) * delta_time)
+		z_rotation_amt := lal.to_radians(f32(15) * delta_time)
+		// log.debugf("rot_amt=%.2f", rotation_amt)
+		rot_apply := lal.quaternion_from_euler_angles_f32(
+			x_rotation_amt,
+			y_rotation_amt,
+			z_rotation_amt,
+			.XYZ,
+		)
+		banana.rot = rot_apply * banana.rot
+
 
 		// render
+		renderer.flush_nodes(&r)
 		renderer.render(&r)
 	}
 }

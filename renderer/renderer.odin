@@ -14,6 +14,7 @@ import lal "core:math/linalg"
 import "core:mem"
 import os "core:os/os2"
 import "core:path/filepath"
+import "core:slice"
 import "core:strings"
 
 shader_dir :: "shaders"
@@ -49,7 +50,9 @@ Renderer :: struct {
 
 Node :: struct {
 	parent:            pool.Pool_Key,
-	local_transform:   matrix[4, 4]f32,
+	pos:               [3]f32,
+	rot:               quaternion128,
+	scale:             [3]f32,
 	mesh:              glist.Glist_Idx,
 	material:          glist.Glist_Idx,
 
@@ -190,6 +193,7 @@ load_mesh :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 	idx_byte_size_u32 := u32(idxs_size)
 
 	gpu_mesh: GPU_Mesh
+	gpu_mesh.num_idxs = u32(len(mesh.idxs))
 	gpu_mesh.vert_buf = sdl.CreateGPUBuffer(
 		r.gpu,
 		{usage = {.VERTEX}, size = verts_size_u32},
@@ -252,6 +256,7 @@ load_all_meshes :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
 load_texture :: proc(r: ^Renderer, file_name: string) -> (tex: sdl.GPUTextureSamplerBinding) {
 	temp_mem := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
+	log.infof("loading texture: %s", file_name)
 
 	file_path := filepath.join(
 		{dist_dir, texture_dir, file_name},
@@ -259,7 +264,14 @@ load_texture :: proc(r: ^Renderer, file_name: string) -> (tex: sdl.GPUTextureSam
 	)
 	file_path_cstring := strings.clone_to_cstring(file_path, allocator = context.temp_allocator)
 	disk_surface := sdli.Load(file_path_cstring);sdle.sdl_err(disk_surface)
-	surface := sdl.ConvertSurface(disk_surface, .RGBA8888);sdle.sdl_err(surface)
+	palette := sdl.GetSurfacePalette(disk_surface)
+	surface := sdl.ConvertSurfaceAndColorspace(
+		disk_surface,
+		.RGBA32,
+		palette,
+		.SRGB,
+		0,
+	);sdle.sdl_err(surface)
 	sdl.DestroySurface(disk_surface)
 	defer sdl.DestroySurface(surface)
 
@@ -267,7 +279,6 @@ load_texture :: proc(r: ^Renderer, file_name: string) -> (tex: sdl.GPUTextureSam
 	height := u32(surface.h)
 	len_pixels := int(surface.h * surface.pitch)
 	len_pixels_u32 := u32(len_pixels)
-	log.infof("loading texture: %s", file_name)
 	// log.debugf("width=%d", width)
 	// log.debugf("height=%d", height)
 
@@ -275,7 +286,7 @@ load_texture :: proc(r: ^Renderer, file_name: string) -> (tex: sdl.GPUTextureSam
 		r.gpu,
 		{
 			type = .D2,
-			format = .R8G8B8A8_UNORM,
+			format = .R8G8B8A8_UNORM_SRGB,
 			usage = {.SAMPLER},
 			width = width,
 			height = height,
@@ -387,9 +398,11 @@ Make_Node_Params :: struct {
 make_node :: proc(
 	r: ^Renderer,
 	mesh_name: string,
+	pos := [3]f32{0, 0, 0},
+	rot := lal.QUATERNIONF32_IDENTITY,
+	scale := [3]f32{1, 1, 1},
 	material_name := "default",
 	parent := pool.Pool_Key{},
-	transform := lal.MATRIX4F32_IDENTITY,
 ) -> (
 	key: pool.Pool_Key,
 	err: Make_Node_Error,
@@ -397,7 +410,9 @@ make_node :: proc(
 	ok: bool
 	node: Node
 	node.parent = parent
-	node.local_transform = transform
+	node.pos = pos
+	node.rot = rot
+	node.scale = scale
 	node.mesh, ok = r.mesh_catalog[mesh_name]
 	if !ok {
 		err = .Mesh_Not_Found
@@ -448,13 +463,17 @@ next_node_parent :: #force_inline proc(
 	return
 }
 
+local_transform :: #force_inline proc(n: Node) -> lal.Matrix4f32 {
+	return lal.matrix4_from_trs_f32(n.pos, n.rot, n.scale)
+}
+
 @(private)
 compute_node_transforms :: proc(r: ^Renderer) {
 	temp_mem := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
 	stack := make([dynamic]^Node, 0, pool.num_active(r.nodes), allocator = context.temp_allocator)
 	idx: pool.Pool_Idx
-	for node in pool.next(&r.nodes, &idx) {
+	for node, i in pool.next(&r.nodes, &idx) {
 		if node._visited do continue
 		node._visited = true
 
@@ -469,17 +488,24 @@ compute_node_transforms :: proc(r: ^Renderer) {
 			append(&stack, parent)
 		}
 		#reverse for s_node in stack {
-			s_node._global_transform = s_node.local_transform * parent_transform
+			s_node._global_transform = local_transform(s_node^) * parent_transform
 			parent_transform = s_node._global_transform
 		}
-		node._global_transform = node.local_transform * parent_transform
+		node._global_transform = local_transform(node^) * parent_transform
 		clear(&stack)
 	}
 	idx = 0
-	for node in pool.next(&r.nodes, &idx) {
+	for node, i in pool.next(&r.nodes, &idx) {
 		node._visited = false
 	}
 	return
+}
+
+flush_nodes :: proc(r: ^Renderer) {
+	// log.infof("flushing %d frees", r.nodes._free_buf_len)
+	pool.flush_frees(&r.nodes)
+	// log.infof("flushing %d inserts", r.nodes._insert_buf_len)
+	flush_node_inserts(r)
 }
 
 render :: proc(r: ^Renderer) {
@@ -513,10 +539,6 @@ render :: proc(r: ^Renderer) {
 	defer sdl.EndGPURenderPass(render_pass)
 	sdl.BindGPUGraphicsPipeline(render_pass, r.pipeline)
 
-	// log.infof("flushing %d frees", r.nodes._free_buf_len)
-	pool.flush_frees(&r.nodes)
-	// log.infof("flushing %d inserts", r.nodes._insert_buf_len)
-	flush_node_inserts(r)
 	// log.infof("computing %d node transforms", pool.num_active(r.nodes))
 	compute_node_transforms(r)
 	vp := r.proj_mat * r.view_mat
@@ -532,23 +554,23 @@ render :: proc(r: ^Renderer) {
 				if !ok do continue
 				// log.infof("rendering node %d", node_idx)
 
-				num_instances += 1
 				screen_transform := vp * node._global_transform
-				log.infof("pos=%v", screen_transform * [4]f32{0, 0, 0, 1})
-				log.infof("rot=%v %v %v", lal.euler_angles_xyz_from_matrix4_f32(screen_transform))
-				get_scale_from_col_major_matrix :: proc(m: matrix[4, 4]f32) -> [3]f32 {
-					return {
-						lal.vector_length(m[0].xyz),
-						lal.vector_length(m[1].xyz),
-						lal.vector_length(m[2].xyz),
-					}
-				}
-
-				log.infof("scale=%v", get_scale_from_col_major_matrix(screen_transform))
+				// log.infof("pos=%v", screen_transform * [4]f32{0, 0, 0, 1})
+				// log.infof("rot=%v %v %v", lal.euler_angles_xyz_from_matrix4_f32(screen_transform))
+				// get_scale_from_col_major_matrix :: proc(m: matrix[4, 4]f32) -> [3]f32 {
+				// 	return {
+				// 		lal.vector_length(m[0].xyz),
+				// 		lal.vector_length(m[1].xyz),
+				// 		lal.vector_length(m[2].xyz),
+				// 	}
+				// }
+				// log.infof("scale=%v", get_scale_from_col_major_matrix(screen_transform))
 				mvp_ubo.mvps[num_instances] = screen_transform
+				num_instances += 1
 				if material == nil {
 					material = glist.get(&r.materials, glist.Glist_Idx(material_idx))
 					sdl.BindGPUFragmentSamplers(render_pass, 0, &(material.base), 1)
+					// log.debugf("binding material...")
 				}
 				if mesh == nil {
 					mesh = glist.get(&r.meshes, glist.Glist_Idx(mesh_idx))
@@ -564,6 +586,7 @@ render :: proc(r: ^Renderer) {
 						sdl.GPUBufferBinding{buffer = mesh.idx_buf},
 						._16BIT,
 					)
+					// log.debugf("binding mesh...")
 				}
 				if num_instances == MAX_DYNAMIC_BATCH {
 					// flush batch
@@ -593,6 +616,7 @@ render :: proc(r: ^Renderer) {
 				size_of(matrix[4, 4]f32) * num_instances,
 			)
 			sdl.DrawGPUIndexedPrimitives(render_pass, mesh.num_idxs, num_instances, 0, 0, 0)
+			// log.debugf("drawing %d primitive(s)...", num_instances)
 		}
 	}
 }
