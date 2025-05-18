@@ -19,7 +19,6 @@ import "core:strings"
 shader_dir :: "shaders"
 dist_dir :: "dist"
 out_shader_ext :: "spv"
-target_env :: "vulkan1.4"
 texture_dir :: "textures"
 model_dir :: "models"
 material_dir :: "materials"
@@ -71,7 +70,7 @@ GPU_Material :: struct {
 @(private)
 make_entity_pipeline :: proc(r: Renderer) -> (pipeline: ^sdl.GPUGraphicsPipeline) {
 	vert_shader := load_shader(r.gpu, "default.spv.vert", {uniform_buffers = 1})
-	frag_shader := load_shader(r.gpu, "default.spv.frag", {uniform_buffers = 1})
+	frag_shader := load_shader(r.gpu, "default.spv.frag", {samplers = 1})
 
 	vertex_attrs := []sdl.GPUVertexAttribute {
 		{location = 0, format = .FLOAT3, offset = u32(offset_of(Vertex_Data, pos))},
@@ -174,13 +173,14 @@ load_mesh :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 	assert(r.copy_cmd_buf != nil)
 	temp_mem := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
-
+	log.infof("loading mesh: %s", file_name)
 	mesh := obj_load(file_name)
+
 	idxs_size := len(mesh.idxs) * size_of(u16)
 	verts_size := len(mesh.verts) * size_of(Vertex_Data)
-
 	verts_size_u32 := u32(verts_size)
 	idx_byte_size_u32 := u32(idxs_size)
+
 	gpu_mesh: GPU_Mesh
 	gpu_mesh.vert_buf = sdl.CreateGPUBuffer(
 		r.gpu,
@@ -192,20 +192,23 @@ load_mesh :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 	);sdle.sdl_err(gpu_mesh.idx_buf)
 
 	idx := glist.insert(&r.meshes, gpu_mesh) or_return
-	r.mesh_catalog[file_name] = idx
-
 	transfer_buf := sdl.CreateGPUTransferBuffer(
 		r.gpu,
 		{usage = .UPLOAD, size = verts_size_u32 + idx_byte_size_u32},
 	);sdle.sdl_err(transfer_buf)
+	defer sdl.ReleaseGPUTransferBuffer(r.gpu, transfer_buf)
+
 	transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
 		r.gpu,
 		transfer_buf,
 		false,
 	);sdle.sdl_err(transfer_mem)
+
 	mem.copy(transfer_mem, raw_data(mesh.verts), verts_size)
 	mem.copy(transfer_mem[verts_size:], raw_data(mesh.idxs), idxs_size)
+
 	sdl.UnmapGPUTransferBuffer(r.gpu, transfer_buf)
+
 	sdl.UploadToGPUBuffer(
 		r.copy_pass,
 		{transfer_buffer = transfer_buf},
@@ -218,6 +221,9 @@ load_mesh :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		{buffer = gpu_mesh.idx_buf, size = idx_byte_size_u32},
 		false,
 	)
+	mesh_name := filepath.short_stem(file_name)
+	mesh_name = strings.clone(mesh_name)
+	r.mesh_catalog[mesh_name] = idx
 	return
 }
 
@@ -244,13 +250,18 @@ load_texture :: proc(r: ^Renderer, file_name: string) -> (tex: sdl.GPUTextureSam
 		allocator = context.temp_allocator,
 	)
 	file_path_cstring := strings.clone_to_cstring(file_path, allocator = context.temp_allocator)
-	surface := sdli.Load(file_path_cstring);sdle.sdl_err(surface)
+	disk_surface := sdli.Load(file_path_cstring);sdle.sdl_err(disk_surface)
+	surface := sdl.ConvertSurface(disk_surface, .RGBA8888);sdle.sdl_err(surface)
+	sdl.DestroySurface(disk_surface)
 	defer sdl.DestroySurface(surface)
+
 	width := u32(surface.w)
 	height := u32(surface.h)
-	log.debugf("loading texture: %s", file_name)
-	log.debugf("width=%d", width)
-	log.debugf("height=%d", height)
+	len_pixels := int(surface.h * surface.pitch)
+	len_pixels_u32 := u32(len_pixels)
+	log.infof("loading texture: %s", file_name)
+	// log.debugf("width=%d", width)
+	// log.debugf("height=%d", height)
 
 	tex.texture = sdl.CreateGPUTexture(
 		r.gpu,
@@ -264,19 +275,21 @@ load_texture :: proc(r: ^Renderer, file_name: string) -> (tex: sdl.GPUTextureSam
 			num_levels = 1,
 		},
 	);sdle.sdl_err(tex.texture)
-	len_pixels := int(surface.h * surface.pitch)
-	len_pixels_u32 := u32(len_pixels)
 	tex_transfer_buf := sdl.CreateGPUTransferBuffer(
 		r.gpu,
 		{usage = .UPLOAD, size = len_pixels_u32},
 	);sdle.sdl_err(tex_transfer_buf)
+	defer sdl.ReleaseGPUTransferBuffer(r.gpu, tex_transfer_buf)
+
 	tex_transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
 		r.gpu,
 		tex_transfer_buf,
 		false,
 	);sdle.sdl_err(tex_transfer_mem)
-	log.debugf("mempcpy %d bytes to texture transfer buf", len_pixels)
+
+	// log.debugf("mempcpy %d bytes to texture transfer buf", len_pixels)
 	mem.copy(tex_transfer_mem, surface.pixels, len_pixels)
+
 	sdl.UnmapGPUTransferBuffer(r.gpu, tex_transfer_buf)
 	sdl.UploadToGPUTexture(
 		r.copy_pass,
@@ -296,6 +309,7 @@ Material_Meta :: struct {
 load_material :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Error) {
 	temp_mem := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
+	log.infof("loading material: %s", file_name)
 
 	file_path := filepath.join(
 		{dist_dir, material_dir, file_name},
@@ -325,7 +339,9 @@ load_material :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocato
 	material.base = load_texture(r, meta.base)
 
 	idx := glist.insert(&r.materials, material) or_return
-	r.material_catalog[file_name] = idx
+	material_name := filepath.short_stem(file_name)
+	material_name = strings.clone(material_name)
+	r.material_catalog[material_name] = idx
 	return
 }
 
@@ -342,16 +358,51 @@ load_all_materials :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
 	return
 }
 
-// insert_node_defered :: proc(
-// 	r: ^Renderer,
-// 	n: Node,
-// ) -> (
-// 	key: pool.Pool_Key,
-// 	err: runtime.Allocator_Error,
-// ) {
-// 	key = pool.insert_defered(&r.nodes, n) or_return
-// 	return
-// }
+Make_Node_Error :: union #shared_nil {
+	runtime.Allocator_Error,
+	Catalog_Error,
+}
+Catalog_Error :: enum {
+	None = 0,
+	Mesh_Not_Found,
+	Material_Not_Found,
+}
+
+Make_Node_Params :: struct {
+	mesh_name:     string,
+	material_name: string,
+	parent:        pool.Pool_Key,
+	transform:     matrix[4, 4]f32,
+}
+
+make_node :: proc(
+	r: ^Renderer,
+	p: Make_Node_Params,
+) -> (
+	key: pool.Pool_Key,
+	err: Make_Node_Error,
+) {
+	ok: bool
+	node: Node
+	node.parent = p.parent
+	node.local_transform = p.transform
+	node.mesh, ok = r.mesh_catalog[p.mesh_name]
+	if !ok {
+		err = .Mesh_Not_Found
+		return
+	}
+	material_name := p.material_name
+	if len(p.material_name) == 0 {
+		material_name = "default"
+	}
+	node.material, ok = r.material_catalog[material_name]
+	if !ok {
+		err = .Material_Not_Found
+		return
+	}
+	key = pool.insert_defered(&r.nodes, node) or_return
+	return
+}
 
 @(private)
 flush_node_inserts :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
@@ -361,6 +412,7 @@ flush_node_inserts :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
 		n_key := pool.idx_to_key(&r.nodes, n_idx)
 		n, ok := pool.get(&r.nodes, n_key)
 		if !ok do continue
+		log.infof("flushing insert with key: %v", n_key)
 		if n.material >= u32(len(r.render_map)) {
 			resize(&r.render_map, n.material + 1) or_return
 		}
@@ -368,6 +420,56 @@ flush_node_inserts :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
 			resize(&r.render_map[n.material], n.mesh + 1) or_return
 		}
 		append(&r.render_map[n.material][n.mesh], n_key) or_return
+	}
+	return
+}
+
+
+@(private)
+next_node_parent :: #force_inline proc(
+	r: ^Renderer,
+	node: ^^Node,
+) -> (
+	parent: ^Node,
+	key: pool.Pool_Key,
+	ok: bool,
+) {
+	key = node^.parent
+	parent, ok = pool.get(&r.nodes, key)
+	node^ = parent
+	return
+}
+
+@(private)
+compute_node_transforms :: proc(r: ^Renderer) {
+	temp_mem := runtime.default_temp_allocator_temp_begin()
+	defer runtime.default_temp_allocator_temp_end(temp_mem)
+	stack := make([dynamic]^Node, 0, pool.num_active(r.nodes), allocator = context.temp_allocator)
+	idx: pool.Pool_Idx
+	for node in pool.next(&r.nodes, &idx) {
+		if node._visited do continue
+		node._visited = true
+
+		cur := node
+		parent_transform: matrix[4, 4]f32
+		for parent in next_node_parent(r, &cur) {
+			if parent._visited {
+				parent_transform = parent._global_transform
+				break
+			}
+			parent._visited = true
+			append(&stack, parent)
+		}
+		#reverse for s_node in stack {
+			s_node._global_transform = s_node.local_transform * parent_transform
+			parent_transform = s_node._global_transform
+		}
+		node._global_transform = node.local_transform * parent_transform
+		clear(&stack)
+	}
+	idx = 0
+	for node in pool.next(&r.nodes, &idx) {
+		node._visited = false
 	}
 	return
 }
@@ -391,7 +493,6 @@ render :: proc(r: ^Renderer) {
 		nil,
 	);sdle.sdl_err(ok)
 	if swapchain_tex == nil do return
-	log.infof("got one!")
 
 	color_target := sdl.GPUColorTargetInfo {
 		texture     = swapchain_tex,
@@ -399,13 +500,19 @@ render :: proc(r: ^Renderer) {
 		clear_color = {0, 0, 0, 0},
 		store_op    = .STORE,
 	}
+
 	render_pass := sdl.BeginGPURenderPass(cmd_buf, &color_target, 1, nil)
 	defer sdl.EndGPURenderPass(render_pass)
 	sdl.BindGPUGraphicsPipeline(render_pass, r.pipeline)
-	vp := r.proj_mat * r.view_mat
 
+	// log.infof("flushing %d frees", r.nodes._free_buf_len)
 	pool.flush_frees(&r.nodes)
+	// log.infof("flushing %d inserts", r.nodes._insert_buf_len)
 	flush_node_inserts(r)
+	// log.infof("computing %d node transforms", pool.num_active(r.nodes))
+	compute_node_transforms(r)
+	vp := r.proj_mat * r.view_mat
+	// log.info("drawing...")
 	// draw
 	for material_meshes, material_idx in r.render_map {
 		material: ^GPU_Material

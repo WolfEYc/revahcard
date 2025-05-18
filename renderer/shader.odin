@@ -56,6 +56,9 @@ load_shader :: proc(
 	   (in_stat_err == nil &&
 			   time.diff(out_file_info.modification_time, input_stat.modification_time) > 0) {
 		compile_shader(input_path, output_path)
+		log.infof("compiled shader: %s -> %s", input_path, output_path)
+	} else {
+		log.infof("using cached shader: %s", output_path)
 	}
 
 	out_code, read_err := os.read_entire_file_from_path(
@@ -84,13 +87,12 @@ load_shader :: proc(
 }
 
 compile_shader :: proc(input_path: string, output_path: string) {
-	cmd_slice := make([]string, 5, allocator = context.temp_allocator)
+	cmd_slice: [4]string
 	cmd_slice[0] = "glslc"
 	cmd_slice[1] = input_path
 	cmd_slice[2] = "-o"
 	cmd_slice[3] = output_path
-	cmd_slice[4] = "--target-env=" + target_env
-	process, err := os.process_start({command = cmd_slice, stdout = os.stderr, stderr = os.stderr})
+	process, err := os.process_start({command = cmd_slice[:], stdout = os.stderr, stderr = os.stderr})
 	if err != nil {
 		log.panicf("failed to start glslc to compile shader, reason: %v", err)
 	}

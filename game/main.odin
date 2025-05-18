@@ -1,5 +1,6 @@
 package main
 
+import "../lib/pool"
 import "../lib/sdle"
 import "../renderer"
 import "core:log"
@@ -28,6 +29,12 @@ main :: proc() {
 	if err != nil do log.panic(err)
 	err = renderer.load_all_assets(&r)
 	if err != nil do log.panic(err)
+
+	// load some bananers
+	banana_node, node_err := renderer.make_node(&r, {mesh_name = "item-banana"})
+	if node_err != nil do log.panic(node_err)
+	log.infof("banana_key=%v", banana_node)
+
 
 	last_ticks := sdl.GetTicks()
 	main_loop: for {

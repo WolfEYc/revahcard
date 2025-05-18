@@ -23,9 +23,12 @@ Pool :: struct($T: typeid) {
 	_free_buf_len:    Pool_Idx,
 	_insert_buf_len:  Pool_Idx,
 	_max_active_len:  Pool_Idx, // useful for not wasting iterating into the inactive only entities range
-	_num_actives:     Pool_Idx,
+	_num_actives:     int,
 }
 
+num_active :: #force_inline proc(p: Pool($T)) -> int {
+	return p._num_actives
+}
 
 make :: proc($T: typeid, cap: Pool_Idx) -> (pool: Pool(T), err: runtime.Allocator_Error) {
 	Entity_Elem :: struct {
@@ -74,13 +77,14 @@ next :: #force_inline proc(
 	i := idx^
 	for ; i < pool._max_active_len; i += 1 {
 		if !pool._actives[i] do continue
-		next_key.idx = i
-		next_key.gen = pool._gens[i]
+		key.idx = i
+		key.gen = pool._gens[i]
 		entity = &pool._entities[i]
 		ok = true
 		break
 	}
-	idx^ = i
+	idx^ = i + 1
+	return
 }
 
 @(private)
@@ -102,6 +106,7 @@ free_immediate :: proc(pool: ^Pool($T), key: Pool_Key) #no_bounds_check {
 	free(pool, idx.idx)
 	backtrack_max_active_idx(pool)
 	pool._vacant_len += 1
+	pool._num_actives -= 1
 }
 
 free_defered :: #force_inline proc(pool: ^Pool($T), key: Pool_Key) #no_bounds_check {
@@ -119,6 +124,7 @@ flush_frees :: proc(pool: ^Pool($T)) #no_bounds_check {
 		free(pool, idx)
 	}
 	pool._vacant_len += pool._free_buf_len
+	pool._num_actives -= int(pool._free_buf_len)
 	pool._free_buf_len = 0
 	backtrack_max_active_idx(pool)
 }
@@ -221,7 +227,7 @@ flush_inserts :: proc(pool: ^Pool($T)) #no_bounds_check {
 		pool._actives[idx] = true
 		pool._max_active_len = max(pool._max_active_len, idx + 1)
 	}
-	pool._num_actives += pool._insert_buf_len
+	pool._num_actives += int(pool._insert_buf_len)
 	pool._insert_buf_len = 0
 }
 
