@@ -111,7 +111,7 @@ free_immediate :: proc(pool: ^Pool($T), key: Pool_Key) #no_bounds_check {
 
 free_defered :: #force_inline proc(pool: ^Pool($T), key: Pool_Key) #no_bounds_check {
 	if !validate_idx(pool, key) do return
-	pool._free_buf[pool._free_buf_len] = idx.idx
+	pool._free_buf[pool._free_buf_len] = key.idx
 	pool._free_buf_len += 1
 }
 
