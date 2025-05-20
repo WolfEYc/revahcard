@@ -37,9 +37,13 @@ main :: proc() {
 		// load some bananers
 		pos: [3]f32
 		rot: [3]f32
-		for i in 0 ..< 3 {
-			pos[i] = rand.float32_range(-2, 2)
-			rot[i] = rand.float32_range(-math.PI, math.PI)
+		{
+			pos.x = rand.float32_range(-2, 2)
+			pos.y = rand.float32_range(-1.25, 1.25)
+			pos.z = rand.float32_range(-4, -1.5)
+			rot.x = rand.float32_range(-math.PI, math.PI)
+			rot.y = rand.float32_range(-math.PI, math.PI)
+			rot.z = rand.float32_range(-math.PI, math.PI)
 		}
 
 		rot_quat := lal.quaternion_from_euler_angles_f32(rot[0], rot[1], rot[2], .XYZ)
@@ -53,7 +57,6 @@ main :: proc() {
 	for _ in 0 ..< 1000 {
 		spawn_bananer(&r, &bananers)
 	}
-
 
 	renderer.flush_nodes(&r)
 	last_ticks := sdl.GetTicks()

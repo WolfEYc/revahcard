@@ -552,12 +552,9 @@ flush_nodes :: proc(r: ^Renderer) {
 	flush_node_inserts(r)
 }
 
+mvps_buffer := [MAX_NODE_COUNT]matrix[4, 4]f32{}
 render :: proc(r: ^Renderer) {
 	MAX_DYNAMIC_BATCH :: 64
-	Mvp_Ubo :: struct {
-		mvps: [MAX_DYNAMIC_BATCH]matrix[4, 4]f32,
-	}
-	mvp_ubo: Mvp_Ubo
 
 	cmd_buf := sdl.AcquireGPUCommandBuffer(r._gpu);sdle.sdl_err(cmd_buf)
 	defer {ok := sdl.SubmitGPUCommandBuffer(cmd_buf);sdle.sdl_err(ok)}
@@ -598,25 +595,16 @@ render :: proc(r: ^Renderer) {
 		material: ^GPU_Material
 		for mesh_nodes, mesh_idx in material_meshes {
 			mesh: ^GPU_Mesh
-			num_instances := u32(0)
+			draw_instances := u32(0)
+			instance_idx := u32(0)
 			for node_key, node_idx in mesh_nodes {
 				node, ok := pool.get(&r._nodes, node_key)
 				if !ok do continue
 				// log.infof("rendering node %d", node_idx)
 
-				screen_transform := vp * node._global_transform
-				// log.infof("pos=%v", screen_transform * [4]f32{0, 0, 0, 1})
-				// log.infof("rot=%v %v %v", lal.euler_angles_xyz_from_matrix4_f32(screen_transform))
-				// get_scale_from_col_major_matrix :: proc(m: matrix[4, 4]f32) -> [3]f32 {
-				// 	return {
-				// 		lal.vector_length(m[0].xyz),
-				// 		lal.vector_length(m[1].xyz),
-				// 		lal.vector_length(m[2].xyz),
-				// 	}
-				// }
-				// log.infof("scale=%v", get_scale_from_col_major_matrix(screen_transform))
-				mvp_ubo.mvps[num_instances] = screen_transform
-				num_instances += 1
+				mvps_buffer[instance_idx] = vp * node._global_transform
+				draw_instances += 1
+				instance_idx += 1
 				if material == nil {
 					material = glist.get(&r._materials, glist.Glist_Idx(material_idx))
 					sdl.BindGPUFragmentSamplers(render_pass, 0, &(material.base), 1)
@@ -638,34 +626,36 @@ render :: proc(r: ^Renderer) {
 					)
 					// log.debugf("binding mesh...")
 				}
-				if num_instances == MAX_DYNAMIC_BATCH {
+				if draw_instances == MAX_DYNAMIC_BATCH {
 					// flush batch
-					num_instances = 0
+					draw_instances = 0
+
 					sdl.PushGPUVertexUniformData(
 						cmd_buf,
 						0,
-						&(mvp_ubo),
-						size_of(matrix[4, 4]f32) * num_instances,
+						raw_data(mvps_buffer[instance_idx - MAX_DYNAMIC_BATCH:instance_idx]),
+						size_of(matrix[4, 4]f32) * MAX_DYNAMIC_BATCH,
 					)
 					sdl.DrawGPUIndexedPrimitives(
 						render_pass,
 						mesh.num_idxs,
-						num_instances,
+						MAX_DYNAMIC_BATCH,
 						0,
 						0,
 						0,
 					)
 				}
 			}
-			if num_instances == 0 do continue
+			if draw_instances == 0 do continue
 			// flush leftovers
+
 			sdl.PushGPUVertexUniformData(
 				cmd_buf,
 				0,
-				&(mvp_ubo),
-				size_of(matrix[4, 4]f32) * num_instances,
+				raw_data(mvps_buffer[instance_idx - draw_instances:instance_idx]),
+				size_of(matrix[4, 4]f32) * draw_instances,
 			)
-			sdl.DrawGPUIndexedPrimitives(render_pass, mesh.num_idxs, num_instances, 0, 0, 0)
+			sdl.DrawGPUIndexedPrimitives(render_pass, mesh.num_idxs, draw_instances, 0, 0, 0)
 			// log.debugf("drawing %d primitive(s)...", num_instances)
 		}
 	}
