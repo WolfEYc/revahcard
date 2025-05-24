@@ -52,9 +52,9 @@ main :: proc() {
 		if node_err != nil do log.panic(node_err)
 		append(bananers, banana_key)
 	}
-	bananers := make([dynamic]pool.Pool_Key, 0, 1000)
+	bananers := make([dynamic]pool.Pool_Key, 0, 10000)
 
-	for _ in 0 ..< 1000 {
+	for _ in 0 ..< 10000 {
 		spawn_bananer(&r, &bananers)
 	}
 

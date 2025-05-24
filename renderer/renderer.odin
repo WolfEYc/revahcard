@@ -156,7 +156,7 @@ new :: proc(
 	r._gpu = gpu
 	r._window = window
 
-	ok = sdl.SetGPUSwapchainParameters(gpu, window, .SDR_LINEAR, .IMMEDIATE);sdle.sdl_err(ok)
+	ok = sdl.SetGPUSwapchainParameters(gpu, window, .SDR_LINEAR, .MAILBOX);sdle.sdl_err(ok)
 
 	init_render_pipeline(&r)
 
