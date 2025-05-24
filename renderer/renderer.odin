@@ -32,22 +32,25 @@ MAX_MESH_COUNT :: 1024
 MAX_MATERIAL_COUNT :: 1024
 
 Renderer :: struct {
-	camera:            Camera,
+	camera:                Camera,
 	//private
-	_gpu:              ^sdl.GPUDevice,
-	_window:           ^sdl.Window,
-	_pipeline:         ^sdl.GPUGraphicsPipeline,
-	_nodes:            pool.Pool(Node),
-	_meshes:           glist.Glist(GPU_Mesh),
-	_materials:        glist.Glist(GPU_Material),
-	_mesh_catalog:     map[string]glist.Glist_Idx,
-	_material_catalog: map[string]glist.Glist_Idx,
-	_copy_cmd_buf:     ^sdl.GPUCommandBuffer,
-	_copy_pass:        ^sdl.GPUCopyPass,
-	_proj_mat:         matrix[4, 4]f32,
-	_depth_tex:        ^sdl.GPUTexture,
+	_gpu:                  ^sdl.GPUDevice,
+	_window:               ^sdl.Window,
+	_pipeline:             ^sdl.GPUGraphicsPipeline,
+	_nodes:                pool.Pool(Node),
+	_meshes:               glist.Glist(GPU_Mesh),
+	_materials:            glist.Glist(GPU_Material),
+	_mesh_catalog:         map[string]glist.Glist_Idx,
+	_material_catalog:     map[string]glist.Glist_Idx,
+	_copy_cmd_buf:         ^sdl.GPUCommandBuffer,
+	_copy_pass:            ^sdl.GPUCopyPass,
+	_proj_mat:             matrix[4, 4]f32,
+	_depth_tex:            ^sdl.GPUTexture,
+	_mvps_buffer:          []matrix[4, 4]f32,
+	_mvps_gpu_buffer:      ^sdl.GPUBuffer,
+	_mvps_transfer_buffer: ^sdl.GPUTransferBuffer,
 	//                 material   mesh    node
-	_render_map:       [dynamic][dynamic][dynamic]pool.Pool_Key,
+	_render_map:           [dynamic][dynamic][dynamic]pool.Pool_Key,
 }
 
 Camera :: struct {
@@ -82,7 +85,11 @@ GPU_DEPTH_TEX_FMT :: sdl.GPUTextureFormat.D24_UNORM
 
 @(private)
 init_render_pipeline :: proc(r: ^Renderer) {
-	vert_shader := load_shader(r._gpu, "default.spv.vert", {uniform_buffers = 1})
+	vert_shader := load_shader(
+		r._gpu,
+		"default.spv.vert",
+		{uniform_buffers = 0, storage_buffers = 1},
+	)
 	frag_shader := load_shader(r._gpu, "default.spv.frag", {samplers = 1})
 
 	vertex_attrs := []sdl.GPUVertexAttribute {
@@ -179,7 +186,18 @@ new :: proc(
 			layer_count_or_depth = 1,
 			num_levels = 1,
 		},
-	)
+	);sdle.sdl_err(r._depth_tex)
+	mvps_size := u32(size_of(matrix[4, 4]f32) * MAX_NODE_COUNT)
+	r._mvps_gpu_buffer = sdl.CreateGPUBuffer(
+		r._gpu,
+		{usage = {.GRAPHICS_STORAGE_READ}, size = mvps_size},
+	);sdle.sdl_err(r._mvps_gpu_buffer)
+	r._mvps_transfer_buffer = sdl.CreateGPUTransferBuffer(
+		r._gpu,
+		{usage = .UPLOAD, size = mvps_size},
+	);sdle.sdl_err(r._mvps_transfer_buffer)
+
+	r._mvps_buffer = make([]matrix[4, 4]f32, MAX_NODE_COUNT)
 
 	r.camera.rot = lal.QUATERNIONF32_IDENTITY
 	return
@@ -196,8 +214,8 @@ end_copy_pass :: proc(r: ^Renderer) {
 	assert(r._copy_cmd_buf != nil)
 	assert(r._copy_pass != nil)
 	sdl.EndGPUCopyPass(r._copy_pass)
-	r._copy_pass = nil
 	ok := sdl.SubmitGPUCommandBuffer(r._copy_cmd_buf);sdle.sdl_err(ok)
+	r._copy_pass = nil
 	r._copy_cmd_buf = nil
 }
 
@@ -552,9 +570,10 @@ flush_nodes :: proc(r: ^Renderer) {
 	flush_node_inserts(r)
 }
 
-mvps_buffer := [MAX_NODE_COUNT]matrix[4, 4]f32{}
 render :: proc(r: ^Renderer) {
-	MAX_DYNAMIC_BATCH :: 64
+	compute_node_transforms(r)
+	view := lal.matrix4_from_trs_f32(r.camera.pos, r.camera.rot, [3]f32{1, 1, 1})
+	vp := r._proj_mat * view
 
 	cmd_buf := sdl.AcquireGPUCommandBuffer(r._gpu);sdle.sdl_err(cmd_buf)
 	defer {ok := sdl.SubmitGPUCommandBuffer(cmd_buf);sdle.sdl_err(ok)}
@@ -584,80 +603,80 @@ render :: proc(r: ^Renderer) {
 	render_pass := sdl.BeginGPURenderPass(cmd_buf, &color_target, 1, &depth_target_info)
 	defer sdl.EndGPURenderPass(render_pass)
 	sdl.BindGPUGraphicsPipeline(render_pass, r._pipeline)
+	sdl.BindGPUVertexStorageBuffers(render_pass, 0, &(r._mvps_gpu_buffer), 1)
 
-	// log.infof("computing %d node transforms", pool.num_active(r.nodes))
-	compute_node_transforms(r)
-	view := lal.matrix4_from_trs_f32(r.camera.pos, r.camera.rot, [3]f32{1, 1, 1})
-	vp := r._proj_mat * view
-	// log.info("drawing...")
-	// draw
+	rendered_nodes := u32(0)
 	for material_meshes, material_idx in r._render_map {
 		material: ^GPU_Material
 		for mesh_nodes, mesh_idx in material_meshes {
-			mesh: ^GPU_Mesh
 			draw_instances := u32(0)
-			instance_idx := u32(0)
 			for node_key, node_idx in mesh_nodes {
 				node, ok := pool.get(&r._nodes, node_key)
 				if !ok do continue
-				// log.infof("rendering node %d", node_idx)
 
-				mvps_buffer[instance_idx] = vp * node._global_transform
+				if rendered_nodes == MAX_NODE_COUNT do break
+				r._mvps_buffer[rendered_nodes] = vp * node._global_transform
 				draw_instances += 1
-				instance_idx += 1
-				if material == nil {
-					material = glist.get(&r._materials, glist.Glist_Idx(material_idx))
-					sdl.BindGPUFragmentSamplers(render_pass, 0, &(material.base), 1)
-					// log.debugf("binding material...")
-				}
-				if mesh == nil {
-					mesh = glist.get(&r._meshes, glist.Glist_Idx(mesh_idx))
-					// only bind mesh if we know we are going to draw at least one instance
-					sdl.BindGPUVertexBuffers(
-						render_pass,
-						0,
-						&(sdl.GPUBufferBinding{buffer = mesh.vert_buf}),
-						1,
-					)
-					sdl.BindGPUIndexBuffer(
-						render_pass,
-						sdl.GPUBufferBinding{buffer = mesh.idx_buf},
-						._16BIT,
-					)
-					// log.debugf("binding mesh...")
-				}
-				if draw_instances == MAX_DYNAMIC_BATCH {
-					// flush batch
-					draw_instances = 0
-
-					sdl.PushGPUVertexUniformData(
-						cmd_buf,
-						0,
-						raw_data(mvps_buffer[instance_idx - MAX_DYNAMIC_BATCH:instance_idx]),
-						size_of(matrix[4, 4]f32) * MAX_DYNAMIC_BATCH,
-					)
-					sdl.DrawGPUIndexedPrimitives(
-						render_pass,
-						mesh.num_idxs,
-						MAX_DYNAMIC_BATCH,
-						0,
-						0,
-						0,
-					)
-				}
+				rendered_nodes += 1
 			}
 			if draw_instances == 0 do continue
-			// flush leftovers
 
-			sdl.PushGPUVertexUniformData(
-				cmd_buf,
+			if material == nil {
+				material = glist.get(&r._materials, glist.Glist_Idx(material_idx))
+				sdl.BindGPUFragmentSamplers(render_pass, 0, &(material.base), 1)
+			}
+
+			mesh := glist.get(&r._meshes, glist.Glist_Idx(mesh_idx))
+			sdl.BindGPUVertexBuffers(
+				render_pass,
 				0,
-				raw_data(mvps_buffer[instance_idx - draw_instances:instance_idx]),
-				size_of(matrix[4, 4]f32) * draw_instances,
+				&(sdl.GPUBufferBinding{buffer = mesh.vert_buf}),
+				1,
 			)
-			sdl.DrawGPUIndexedPrimitives(render_pass, mesh.num_idxs, draw_instances, 0, 0, 0)
+			sdl.BindGPUIndexBuffer(
+				render_pass,
+				sdl.GPUBufferBinding{buffer = mesh.idx_buf},
+				._16BIT,
+			)
+			first_draw_index := rendered_nodes - draw_instances
+			sdl.DrawGPUIndexedPrimitives(
+				render_pass,
+				mesh.num_idxs,
+				draw_instances,
+				0,
+				0,
+				first_draw_index,
+			)
 			// log.debugf("drawing %d primitive(s)...", num_instances)
 		}
 	}
+	// in theory we are fine uploading the mvp buffer after the draw calls,
+	// because we didnt submit the render pass or command buffer yet,
+	//  so on the gpu timeline, this actually should occur first
+	storage_buffer_uploads: {
+		start_copy_pass(r)
+		upload_mvp_buffer(r, rendered_nodes)
+		end_copy_pass(r)
+	}
+}
+
+upload_mvp_buffer :: proc(r: ^Renderer, rendered_nodes: u32) {
+	size := size_of(matrix[4, 4]f32) * rendered_nodes
+
+	transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
+		r._gpu,
+		r._mvps_transfer_buffer,
+		true,
+	);sdle.sdl_err(transfer_mem)
+
+	mem.copy(transfer_mem, raw_data(r._mvps_buffer[:rendered_nodes]), int(size))
+
+	sdl.UnmapGPUTransferBuffer(r._gpu, r._mvps_transfer_buffer)
+	sdl.UploadToGPUBuffer(
+		r._copy_pass,
+		{transfer_buffer = r._mvps_transfer_buffer},
+		{buffer = r._mvps_gpu_buffer, size = size},
+		true,
+	)
 }
 
