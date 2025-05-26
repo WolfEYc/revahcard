@@ -6,7 +6,8 @@ layout(location=2) in vec3 normal;
 
 layout(location=0) out vec4 out_color;
 
-layout(set=2, binding=0) uniform sampler2D tex_sampler;
+layout(set=2, binding=0) uniform sampler2D base_sampler;
+layout(set=2, binding=1) uniform sampler2D emissive_sampler;
 
 struct Light {
     vec3 pos;
@@ -15,7 +16,7 @@ struct Light {
     float intensity;
 };
 
-layout(set=2, binding=0) readonly buffer Lights {
+layout(set=2, binding=2) readonly buffer Lights {
     Light lights[64];
 };
 
@@ -26,26 +27,28 @@ layout(set=3, binding=0) uniform Frag_UBO {
 void main() {
     // out_color = texture(tex_sampler, uv);
     
-    float4 emitted_radiance = float4(0);
+    vec3 emitted_radiance = texture(emissive_sampler, uv).xyz;
 
     float normal_sqr_len = dot(normal, normal);
-    float normal_inv_len = inversesqrt(sqr_normal_len);
+    float normal_inv_len = inversesqrt(normal_sqr_len);
 
-    float4 reflected_radiance = float4(0);
+    vec3 reflected_radiance = vec3(0);
     for (int i = 0; i < rendered_lights; ++i) {
         Light light = lights[i];
         vec3 vec_to_light = light.pos - pos;
-        float sqr_dist = dot(vec_2_light, vec_2_light);
+        float sqr_dist = dot(vec_to_light, vec_to_light);
         float inv_dist = inversesqrt(sqr_dist);
-        float incidence_angle_factor = dot(normal, vec_to_light) * inv_dist * normal_inv_len;
-        if (incidence_angle_factor <= 0) {
+        float angle_factor = dot(normal, vec_to_light) * inv_dist * normal_inv_len;
+        if (angle_factor <= 0) {
             continue;
         }
         float attenuation_factor = 1 / sqr_dist;
-        float4 irradiance = incoming_radiance * indicence_angle_factor;
-        float4 brdf = 1;
+        vec3 incoming_radiance = light.color * light.intensity;
+        vec3 irradiance = incoming_radiance * angle_factor * attenuation_factor;
+        vec3 brdf = vec3(1);
         reflected_radiance += irradiance * brdf;
     }
-    
-    out_color = clamp(emitted_radiance + reflected_radiance, 0.0, 1.0);
+    vec3 radiance = clamp(emitted_radiance + reflected_radiance, 0, 1);
+    vec4 base_color = texture(base_sampler, uv);
+    out_color = base_color * vec4(radiance, 1);
 }

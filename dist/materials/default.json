@@ -1,3 +1,4 @@
 {
-  "base": "variation-a.png"
+    "base": "variation-a.png",
+    "emissive": "black.png"
 }

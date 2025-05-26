@@ -10,8 +10,9 @@ import "core:strconv"
 import "core:strings"
 
 Face :: struct {
-	pos: uint,
-	uv:  uint,
+	pos:    uint,
+	uv:     uint,
+	normal: uint,
 }
 
 Mesh :: struct {
@@ -19,8 +20,9 @@ Mesh :: struct {
 	idxs:  [dynamic]u16,
 }
 Vertex_Data :: struct {
-	pos: [3]f32,
-	uv:  [2]f32,
+	pos:    [3]f32,
+	uv:     [2]f32,
+	normal: [3]f32,
 }
 obj_load :: proc(file_name: string) -> (mesh: Mesh) {
 	file_path := filepath.join(
@@ -37,6 +39,7 @@ obj_load :: proc(file_name: string) -> (mesh: Mesh) {
 	defer bufio.scanner_destroy(&scanner)
 	positions: [dynamic][3]f32
 	uvs: [dynamic][2]f32
+	normals: [dynamic][3]f32
 	line_no := 0
 	for bufio.scanner_scan(&scanner) {
 		line := bufio.scanner_text(&scanner)
@@ -73,6 +76,20 @@ obj_load :: proc(file_name: string) -> (mesh: Mesh) {
 					)
 				}
 				append(&uvs, uv)
+			case 'n':
+				if normals == nil {
+					normals = make([dynamic][3]f32, allocator = context.temp_allocator)
+				}
+				normal, err := parse_f32s(3, line[3:])
+				if err != nil {
+					log.panicf(
+						"err in parsing %s normal, on line %d, reason: %v",
+						file_name,
+						line_no,
+						err,
+					)
+				}
+				append(&normals, normal)
 			}
 		case 'f':
 			if mesh.verts == nil {
@@ -100,8 +117,9 @@ obj_load :: proc(file_name: string) -> (mesh: Mesh) {
 			// bean: [3]u16
 			for face, i in faces {
 				mesh.verts[face.pos] = Vertex_Data {
-					pos = positions[face.pos],
-					uv  = uvs[face.uv],
+					pos    = positions[face.pos],
+					uv     = uvs[face.uv],
+					normal = normals[face.normal],
 				}
 				// bean[i] = u16(face.pos)
 				append(&mesh.idxs, u16(face.pos))
@@ -165,22 +183,22 @@ parse_faces :: proc(s: string) -> (faces: [3]Face, err: Parse_Err) {
 	}
 	for str, i in strs {
 		splits := strings.split_n(str, "/", 3, allocator = context.temp_allocator)
-		if len(strs) < 3 {
+		if len(splits) < 3 {
 			err = .Not_Enough_Numbas
 		}
-		ok: bool
-		faces[i].pos, ok = strconv.parse_uint(splits[0], base = 10)
-		if !ok {
-			err = .Strconv_Err
-			return
+		numbas: [3]uint
+		for split, i in splits {
+			ok: bool
+			numbas[i], ok = strconv.parse_uint(split, base = 10)
+			if !ok {
+				err = .Strconv_Err
+				return
+			}
+			numbas[i] -= 1
 		}
-		faces[i].uv, ok = strconv.parse_uint(splits[1], base = 10)
-		if !ok {
-			err = .Strconv_Err
-			return
-		}
-		faces[i].pos -= 1
-		faces[i].uv -= 1
+		faces[i].pos = numbas[0]
+		faces[i].uv = numbas[1]
+		faces[i].normal = numbas[2]
 	}
 	return
 }

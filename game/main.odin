@@ -52,6 +52,17 @@ main :: proc() {
 		if node_err != nil do log.panic(node_err)
 		append(bananers, banana_key)
 	}
+	spawn_light :: proc(r: ^renderer.Renderer, pos: [3]f32) -> (key: pool.Pool_Key) {
+		light_key, err := renderer.make_light(
+			r,
+			{range = 5, color = [3]f32{1, 1, 1}, intensity = 3},
+		)
+		if err != nil do log.panic(err)
+		node_err: renderer.Make_Node_Error
+		key, node_err = renderer.make_node(r, "item-cone", light = light_key, pos = pos)
+		if err != nil do log.panic(err)
+		return
+	}
 	bananers := make([dynamic]pool.Pool_Key, 0, 1000)
 
 	for _ in 0 ..< 500 {
@@ -59,7 +70,10 @@ main :: proc() {
 		spawn(&r, &bananers, "item-box")
 	}
 
+	light := spawn_light(&r, {-2, 0, 0})
+
 	renderer.flush_nodes(&r)
+	renderer.flush_lights(&r)
 	last_ticks := sdl.GetTicks()
 
 	main_loop: for {
@@ -97,6 +111,7 @@ main :: proc() {
 
 		// render
 		renderer.flush_nodes(&r)
+		renderer.flush_lights(&r)
 		renderer.render(&r)
 	}
 }
