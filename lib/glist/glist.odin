@@ -32,6 +32,7 @@ insert :: #force_inline proc(
 		return
 	}
 	list._data[list._len] = e
+	idx = list._len
 	list._len += 1
 	return
 }

@@ -33,7 +33,7 @@ main :: proc() {
 	err = renderer.load_all_assets(&r)
 	if err != nil do log.panic(err)
 
-	spawn_bananer :: proc(r: ^renderer.Renderer, bananers: ^[dynamic]pool.Pool_Key) {
+	spawn :: proc(r: ^renderer.Renderer, bananers: ^[dynamic]pool.Pool_Key, model: string) {
 		// load some bananers
 		pos: [3]f32
 		rot: [3]f32
@@ -48,14 +48,15 @@ main :: proc() {
 
 		rot_quat := lal.quaternion_from_euler_angles_f32(rot[0], rot[1], rot[2], .XYZ)
 
-		banana_key, node_err := renderer.make_node(r, "item-banana", pos = pos, rot = rot_quat)
+		banana_key, node_err := renderer.make_node(r, model, pos = pos, rot = rot_quat)
 		if node_err != nil do log.panic(node_err)
 		append(bananers, banana_key)
 	}
-	bananers := make([dynamic]pool.Pool_Key, 0, 10000)
+	bananers := make([dynamic]pool.Pool_Key, 0, 1000)
 
-	for _ in 0 ..< 10000 {
-		spawn_bananer(&r, &bananers)
+	for _ in 0 ..< 500 {
+		spawn(&r, &bananers, "item-banana")
+		spawn(&r, &bananers, "item-box")
 	}
 
 	renderer.flush_nodes(&r)
@@ -93,7 +94,6 @@ main :: proc() {
 
 		// r.camera.pos.x += f32(0.1) * delta_time
 		// r.camera.pos.y -= f32(0.1) * delta_time
-
 
 		// render
 		renderer.flush_nodes(&r)
