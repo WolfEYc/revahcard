@@ -29,20 +29,19 @@ void main() {
     
     vec3 emitted_radiance = texture(emissive_sampler, uv).xyz;
 
-    float normal_sqr_len = dot(normal, normal);
-    float normal_inv_len = inversesqrt(normal_sqr_len);
+    vec3 surface_normal = normalize(normal);
 
     vec3 reflected_radiance = vec3(0);
     for (int i = 0; i < rendered_lights; ++i) {
         Light light = lights[i];
         vec3 vec_to_light = light.pos - pos;
-        float sqr_dist = dot(vec_to_light, vec_to_light);
-        float inv_dist = inversesqrt(sqr_dist);
-        float angle_factor = dot(normal, vec_to_light) * inv_dist * normal_inv_len;
+        float dist_to_light = length(vec_to_light);
+        vec3 dir_to_light = vec_to_light / dist_to_light;
+        float angle_factor = dot(dir_to_light, surface_normal);
         if (angle_factor <= 0) {
             continue;
         }
-        float attenuation_factor = 1 / sqr_dist;
+        float attenuation_factor = 1 / (dist_to_light * dist_to_light);
         vec3 incoming_radiance = light.color * light.intensity;
         vec3 irradiance = incoming_radiance * angle_factor * attenuation_factor;
         vec3 brdf = vec3(1);

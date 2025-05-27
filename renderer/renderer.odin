@@ -66,6 +66,14 @@ Renderer :: struct {
 	_lights:                    pool.Pool(GPU_Light),
 	_lights_gpu_buffer:         ^sdl.GPUBuffer,
 	_lights_transfer_buffer:    ^sdl.GPUTransferBuffer,
+
+	// per frame
+	_draw_cmd_buf:              ^sdl.GPUCommandBuffer,
+	_draw_render_pass:          ^sdl.GPURenderPass,
+	_lights_rendered:           u32,
+	_nodes_rendered:            u32,
+	_vert_ubo:                  Vert_UBO,
+	_frag_ubo:                  Frag_UBO,
 }
 
 Camera :: struct {
@@ -595,24 +603,18 @@ local_transform :: #force_inline proc(n: Node) -> lal.Matrix4f32 {
 }
 
 @(private)
-add_light :: #force_inline proc(
-	r: ^Renderer,
-	node: ^Node,
-	rendered_lights_in: u32,
-) -> (
-	rendered_lights: u32,
-) {
-	if rendered_lights_in == MAX_RENDER_LIGHTS || !node.lit do return
+add_light :: #force_inline proc(r: ^Renderer, node: ^Node) {
+	if r._lights_rendered == MAX_RENDER_LIGHTS || !node.lit do return
 	light, ok := pool.get(&r._lights, node.light)
 	if !ok do return
 	light.pos = node._global_transform[3].xyz
-	r._lights_buffer[rendered_lights_in] = light^
-	rendered_lights = rendered_lights_in + 1
+	r._lights_buffer[r._lights_rendered] = light^
+	r._lights_rendered += 1
 	return
 }
 
 @(private)
-compute_node_transforms_and_lights :: proc(r: ^Renderer) -> (rendered_lights: u32) {
+compute_node_transforms_and_lights :: proc(r: ^Renderer) {
 	temp_mem := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
 	stack := make([dynamic]^Node, 0, pool.num_active(r._nodes), allocator = context.temp_allocator)
@@ -641,7 +643,7 @@ compute_node_transforms_and_lights :: proc(r: ^Renderer) -> (rendered_lights: u3
 	idx = 0
 	for node in pool.next(&r._nodes, &idx) {
 		node._visited = false
-		rendered_lights = add_light(r, node, rendered_lights)
+		add_light(r, node)
 	}
 	return
 }
@@ -658,19 +660,19 @@ flush_lights :: proc(r: ^Renderer) {
 	pool.flush_inserts(&r._lights)
 }
 
-@(private)
-draw :: proc(
-	r: ^Renderer,
+Vert_UBO :: struct {
+	vp: matrix[4, 4]f32,
+}
+Frag_UBO :: struct {
 	rendered_lights: u32,
-) -> (
-	cmd_buf: ^sdl.GPUCommandBuffer,
-	rendered_nodes: u32,
-) {
-	cmd_buf = sdl.AcquireGPUCommandBuffer(r._gpu);sdle.sdl_err(cmd_buf)
+}
+@(private)
+draw :: proc(r: ^Renderer) {
+	r._draw_cmd_buf = sdl.AcquireGPUCommandBuffer(r._gpu);sdle.sdl_err(r._draw_cmd_buf)
 
 	swapchain_tex: ^sdl.GPUTexture
 	ok := sdl.WaitAndAcquireGPUSwapchainTexture(
-		cmd_buf,
+		r._draw_cmd_buf,
 		r._window,
 		&swapchain_tex,
 		nil,
@@ -690,34 +692,32 @@ draw :: proc(
 		clear_depth = 1,
 		store_op    = .DONT_CARE,
 	}
-	render_pass := sdl.BeginGPURenderPass(cmd_buf, &color_target, 1, &depth_target_info)
-	defer sdl.EndGPURenderPass(render_pass)
-	sdl.BindGPUGraphicsPipeline(render_pass, r._pipeline)
-	sdl.BindGPUVertexStorageBuffers(render_pass, 0, &(r._transform_gpu_buffer), 1)
+	r._draw_render_pass = sdl.BeginGPURenderPass(
+		r._draw_cmd_buf,
+		&color_target,
+		1,
+		&depth_target_info,
+	)
+	sdl.BindGPUGraphicsPipeline(r._draw_render_pass, r._pipeline)
+	sdl.BindGPUVertexStorageBuffers(r._draw_render_pass, 0, &(r._transform_gpu_buffer), 1)
 	// log.debugf("LIGHT BUFFA=%v", r._lights_gpu_buffer)
-	sdl.BindGPUFragmentStorageBuffers(render_pass, 0, &(r._lights_gpu_buffer), 1)
+	sdl.BindGPUFragmentStorageBuffers(r._draw_render_pass, 0, &(r._lights_gpu_buffer), 1)
 
-	Vert_UBO :: struct {
-		vp: matrix[4, 4]f32,
-	}
 	view := lal.matrix4_from_trs_f32(r.camera.pos, r.camera.rot, [3]f32{1, 1, 1})
 	vp := r._proj_mat * view
-	vert_ubo := Vert_UBO {
+	r._vert_ubo = Vert_UBO {
 		vp = vp,
 	}
-	sdl.PushGPUVertexUniformData(cmd_buf, 0, &(vert_ubo), 1)
+	sdl.PushGPUVertexUniformData(r._draw_cmd_buf, 0, &r._vert_ubo, size_of(Vert_UBO))
 
-	Frag_UBO :: struct {
-		rendered_lights: u32,
-	}
-	frag_ubo := Frag_UBO {
-		rendered_lights = rendered_lights,
+	r._frag_ubo = Frag_UBO {
+		rendered_lights = r._lights_rendered,
 	}
 	// log.debugf("gonna render %d lights", rendered_lights)
-	sdl.PushGPUFragmentUniformData(cmd_buf, 0, &(frag_ubo), 1)
+	sdl.PushGPUFragmentUniformData(r._draw_cmd_buf, 0, &r._frag_ubo, size_of(Frag_UBO))
 
 	// log.debug("draw init good!")
-
+	r._nodes_rendered = 0
 	for material_meshes, material_idx in r._render_map {
 		material: ^GPU_Material
 		for mesh_nodes, mesh_idx in material_meshes {
@@ -725,17 +725,17 @@ draw :: proc(
 			for node_key, node_idx in mesh_nodes {
 				node, ok := pool.get(&r._nodes, node_key)
 				if !ok || !node.visible do continue
-				if rendered_nodes == MAX_RENDER_NODES do break
-				r._transform_buffer[rendered_nodes] = node._global_transform
+				if r._nodes_rendered == MAX_RENDER_NODES do break
+				r._transform_buffer[r._nodes_rendered] = node._global_transform
 				draw_instances += 1
-				rendered_nodes += 1
+				r._nodes_rendered += 1
 			}
 			if draw_instances == 0 do continue
 
 			if material == nil {
 				material = glist.get(&r._materials, glist.Glist_Idx(material_idx))
 				sdl.BindGPUFragmentSamplers(
-					render_pass,
+					r._draw_render_pass,
 					0,
 					raw_data(material.bindings[:]),
 					len(material.bindings),
@@ -743,18 +743,18 @@ draw :: proc(
 			}
 			mesh := glist.get(&r._meshes, glist.Glist_Idx(mesh_idx))
 			sdl.BindGPUVertexBuffers(
-				render_pass,
+				r._draw_render_pass,
 				0,
 				&(sdl.GPUBufferBinding{buffer = mesh.vert_buf}),
 				1,
 			)
 			sdl.BindGPUIndexBuffer(
-				render_pass,
+				r._draw_render_pass,
 				sdl.GPUBufferBinding{buffer = mesh.idx_buf},
 				._16BIT,
 			)
 
-			first_draw_index := rendered_nodes - draw_instances
+			first_draw_index := r._nodes_rendered - draw_instances
 			// log.debugf(
 			// 	"mesh.num_idxs=%d draw_instances=%d, first_draw_index=%d",
 			// 	mesh.num_idxs,
@@ -762,7 +762,7 @@ draw :: proc(
 			// 	first_draw_index,
 			// )
 			sdl.DrawGPUIndexedPrimitives(
-				render_pass,
+				r._draw_render_pass,
 				mesh.num_idxs,
 				draw_instances,
 				0,
@@ -775,27 +775,30 @@ draw :: proc(
 }
 
 render :: proc(r: ^Renderer) {
-	rendered_lights := compute_node_transforms_and_lights(r)
+	compute_node_transforms_and_lights(r)
 	// log.debug("compute good!")
-	draw_cmd_buf, rendered_nodes := draw(r, rendered_lights)
+	draw(r)
 	// log.debug("draw good!")
 	storage_buffer_uploads: {
 		start_copy_pass(r)
-		upload_transform_buffer(r, rendered_nodes)
+		upload_transform_buffer(r)
 		// log.debug("transform good!")
-		upload_lights_buffer(r, rendered_lights)
+		upload_lights_buffer(r)
 		// log.debug("lights good!")
 		end_copy_pass(r)
 	}
-	ok := sdl.SubmitGPUCommandBuffer(draw_cmd_buf);sdle.sdl_err(ok)
+	sdl.EndGPURenderPass(r._draw_render_pass)
+	ok := sdl.SubmitGPUCommandBuffer(r._draw_cmd_buf);sdle.sdl_err(ok)
+	r._lights_rendered = 0
+	r._nodes_rendered = 0
 }
 
 @(private)
-upload_transform_buffer :: proc(r: ^Renderer, rendered_nodes: u32) {
-	if rendered_nodes == 0 {
+upload_transform_buffer :: proc(r: ^Renderer) {
+	if r._nodes_rendered == 0 {
 		return
 	}
-	size := size_of(matrix[4, 4]f32) * rendered_nodes
+	size := size_of(matrix[4, 4]f32) * r._nodes_rendered
 
 	transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
 		r._gpu,
@@ -815,11 +818,11 @@ upload_transform_buffer :: proc(r: ^Renderer, rendered_nodes: u32) {
 }
 
 @(private)
-upload_lights_buffer :: proc(r: ^Renderer, rendered_lights: u32) {
-	if rendered_lights == 0 {
+upload_lights_buffer :: proc(r: ^Renderer) {
+	if r._lights_rendered == 0 {
 		return
 	}
-	size := size_of(GPU_Light) * rendered_lights
+	size := size_of(GPU_Light) * r._lights_rendered
 
 	transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
 		r._gpu,

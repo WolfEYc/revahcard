@@ -55,22 +55,28 @@ main :: proc() {
 	spawn_light :: proc(r: ^renderer.Renderer, pos: [3]f32) -> (key: pool.Pool_Key) {
 		light_key, err := renderer.make_light(
 			r,
-			{range = 5, color = [3]f32{1, 1, 1}, intensity = 3},
+			{range = 5, color = [3]f32{1, 1, 1}, intensity = 1},
 		)
 		if err != nil do log.panic(err)
 		node_err: renderer.Make_Node_Error
-		key, node_err = renderer.make_node(r, "item-cone", light = light_key, pos = pos)
+		key, node_err = renderer.make_node(
+			r,
+			"item-cone",
+			light = light_key,
+			visible = false,
+			pos = pos,
+		)
 		if err != nil do log.panic(err)
 		return
 	}
-	bananers := make([dynamic]pool.Pool_Key, 0, 1000)
+	bananers := make([dynamic]pool.Pool_Key, 0, 1)
 
-	for _ in 0 ..< 500 {
-		spawn(&r, &bananers, "item-banana")
+	for _ in 0 ..< 1 {
+		spawn(&r, &bananers, "vehicle-drag-racer")
 		// spawn(&r, &bananers, "item-box")
 	}
 
-	light := spawn_light(&r, {-2, 0, 0})
+	light := spawn_light(&r, {0, 0, 0})
 
 	renderer.flush_nodes(&r)
 	renderer.flush_lights(&r)
