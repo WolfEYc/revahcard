@@ -528,6 +528,9 @@ make_node :: proc(
 		err = .Material_Not_Found
 		return
 	}
+	if light.gen != 0 {
+		node.lit = true
+	}
 	key = pool.insert_defered(&r._nodes, node) or_return
 	return
 }
@@ -709,6 +712,7 @@ draw :: proc(
 	frag_ubo := Frag_UBO {
 		rendered_lights = rendered_lights,
 	}
+	log.debugf("gonna render %d lights", rendered_lights)
 	sdl.PushGPUFragmentUniformData(cmd_buf, 0, &(frag_ubo), 1)
 
 	log.debug("draw init good!")
@@ -735,14 +739,7 @@ draw :: proc(
 					raw_data(material.bindings[:]),
 					len(material.bindings),
 				)
-				if material.bindings[Mat_Idx.BASE].texture == nil {
-					panic("mat base was nil")
-				}
-				if material.bindings[Mat_Idx.EMISSIVE].texture == nil {
-					panic("mat base was nil")
-				}
 			}
-
 			mesh := glist.get(&r._meshes, glist.Glist_Idx(mesh_idx))
 			log.debugf("get mesh_idx=%d good!", mesh_idx)
 			log.debugf("%v", mesh)
@@ -770,6 +767,8 @@ draw :: proc(
 			if render_pass == nil {
 				panic("render pass was nil")
 			}
+			log.debugf("render_pass=%v", render_pass)
+			log.debugf("cmd_buf=%v", cmd_buf)
 			sdl.DrawGPUIndexedPrimitives(
 				render_pass,
 				mesh.num_idxs,

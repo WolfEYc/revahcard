@@ -67,7 +67,7 @@ main :: proc() {
 
 	for _ in 0 ..< 500 {
 		spawn(&r, &bananers, "item-banana")
-		spawn(&r, &bananers, "item-box")
+		// spawn(&r, &bananers, "item-box")
 	}
 
 	light := spawn_light(&r, {-2, 0, 0})

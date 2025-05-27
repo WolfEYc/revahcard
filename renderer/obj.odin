@@ -182,7 +182,10 @@ parse_faces :: proc(s: string) -> (faces: [3]Face, err: Parse_Err) {
 		return
 	}
 	for str, i in strs {
-		splits := strings.split_n(str, "/", 3, allocator = context.temp_allocator)
+		splits := strings.split_n(str, "/", 4, allocator = context.temp_allocator)
+		if len(splits) > 3 {
+			err = .Too_Many_Numba
+		}
 		if len(splits) < 3 {
 			err = .Not_Enough_Numbas
 		}
