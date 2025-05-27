@@ -1,11 +1,5 @@
 #version 460
 
-layout(location=0) in vec3 pos;
-layout(location=1) in vec2 uv;
-layout(location=2) in vec3 normal;
-
-layout(location=0) out vec4 out_color;
-
 layout(set=2, binding=0) uniform sampler2D base_sampler;
 layout(set=2, binding=1) uniform sampler2D emissive_sampler;
 
@@ -23,6 +17,12 @@ layout(set=2, binding=2) readonly buffer Lights {
 layout(set=3, binding=0) uniform Frag_UBO {
     uint rendered_lights;
 };
+
+layout(location=0) in vec3 pos;
+layout(location=1) in vec2 uv;
+layout(location=2) in vec3 normal;
+
+layout(location=0) out vec4 out_color;
 
 void main() {
     // out_color = texture(tex_sampler, uv);

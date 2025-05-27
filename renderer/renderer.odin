@@ -278,7 +278,7 @@ load_mesh :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
 	log.infof("loading mesh: %s", file_name)
 	mesh := obj_load(file_name)
-	log.debugf("num_idxs=%d", len(mesh.idxs))
+	// log.debugf("num_idxs=%d", len(mesh.idxs))
 
 	// for v in mesh.verts {
 	// 	log.infof("%v", v)
@@ -694,7 +694,8 @@ draw :: proc(
 	defer sdl.EndGPURenderPass(render_pass)
 	sdl.BindGPUGraphicsPipeline(render_pass, r._pipeline)
 	sdl.BindGPUVertexStorageBuffers(render_pass, 0, &(r._transform_gpu_buffer), 1)
-	sdl.BindGPUFragmentStorageBuffers(render_pass, 2, &(r._lights_gpu_buffer), 1)
+	// log.debugf("LIGHT BUFFA=%v", r._lights_gpu_buffer)
+	sdl.BindGPUFragmentStorageBuffers(render_pass, 0, &(r._lights_gpu_buffer), 1)
 
 	Vert_UBO :: struct {
 		vp: matrix[4, 4]f32,
@@ -712,10 +713,10 @@ draw :: proc(
 	frag_ubo := Frag_UBO {
 		rendered_lights = rendered_lights,
 	}
-	log.debugf("gonna render %d lights", rendered_lights)
+	// log.debugf("gonna render %d lights", rendered_lights)
 	sdl.PushGPUFragmentUniformData(cmd_buf, 0, &(frag_ubo), 1)
 
-	log.debug("draw init good!")
+	// log.debug("draw init good!")
 
 	for material_meshes, material_idx in r._render_map {
 		material: ^GPU_Material
@@ -741,34 +742,25 @@ draw :: proc(
 				)
 			}
 			mesh := glist.get(&r._meshes, glist.Glist_Idx(mesh_idx))
-			log.debugf("get mesh_idx=%d good!", mesh_idx)
-			log.debugf("%v", mesh)
 			sdl.BindGPUVertexBuffers(
 				render_pass,
 				0,
 				&(sdl.GPUBufferBinding{buffer = mesh.vert_buf}),
 				1,
 			)
-			log.debug("bind gpu vertex buffer good!")
 			sdl.BindGPUIndexBuffer(
 				render_pass,
 				sdl.GPUBufferBinding{buffer = mesh.idx_buf},
 				._16BIT,
 			)
 
-			log.debug("bind gpu index buffer good!")
 			first_draw_index := rendered_nodes - draw_instances
-			log.debugf(
-				"mesh.num_idxs=%d draw_instances=%d, first_draw_index=%d",
-				mesh.num_idxs,
-				draw_instances,
-				first_draw_index,
-			)
-			if render_pass == nil {
-				panic("render pass was nil")
-			}
-			log.debugf("render_pass=%v", render_pass)
-			log.debugf("cmd_buf=%v", cmd_buf)
+			// log.debugf(
+			// 	"mesh.num_idxs=%d draw_instances=%d, first_draw_index=%d",
+			// 	mesh.num_idxs,
+			// 	draw_instances,
+			// 	first_draw_index,
+			// )
 			sdl.DrawGPUIndexedPrimitives(
 				render_pass,
 				mesh.num_idxs,
@@ -777,7 +769,6 @@ draw :: proc(
 				0,
 				first_draw_index,
 			)
-			log.debugf("drawing %d primitive(s)...", draw_instances)
 		}
 	}
 	return
@@ -785,15 +776,15 @@ draw :: proc(
 
 render :: proc(r: ^Renderer) {
 	rendered_lights := compute_node_transforms_and_lights(r)
-	log.debug("compute good!")
+	// log.debug("compute good!")
 	draw_cmd_buf, rendered_nodes := draw(r, rendered_lights)
-	log.debug("draw good!")
+	// log.debug("draw good!")
 	storage_buffer_uploads: {
 		start_copy_pass(r)
 		upload_transform_buffer(r, rendered_nodes)
-		log.debug("transform good!")
+		// log.debug("transform good!")
 		upload_lights_buffer(r, rendered_lights)
-		log.debug("lights good!")
+		// log.debug("lights good!")
 		end_copy_pass(r)
 	}
 	ok := sdl.SubmitGPUCommandBuffer(draw_cmd_buf);sdle.sdl_err(ok)
