@@ -99,8 +99,12 @@ GPU_Mesh :: struct {
 	idx_buf:  ^sdl.GPUBuffer,
 	num_idxs: u32,
 }
+Mat_Idx :: enum {
+	BASE,
+	EMISSIVE,
+}
 GPU_Material :: struct {
-	_bindings: [2]sdl.GPUTextureSamplerBinding,
+	bindings: [2]sdl.GPUTextureSamplerBinding,
 }
 
 GPU_DEPTH_TEX_FMT :: sdl.GPUTextureFormat.D24_UNORM
@@ -451,8 +455,8 @@ load_material :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocato
 	}
 
 	material: GPU_Material
-	material._bindings[0] = load_texture(r, meta.base)
-	material._bindings[1] = load_texture(r, meta.emissive)
+	material.bindings[Mat_Idx.BASE] = load_texture(r, meta.base)
+	material.bindings[Mat_Idx.EMISSIVE] = load_texture(r, meta.emissive)
 
 	idx := glist.insert(&r._materials, material) or_return
 	material_name := filepath.short_stem(file_name)
@@ -728,10 +732,15 @@ draw :: proc(
 				sdl.BindGPUFragmentSamplers(
 					render_pass,
 					0,
-					raw_data(material._bindings[:]),
-					len(material._bindings),
+					raw_data(material.bindings[:]),
+					len(material.bindings),
 				)
-				log.debug("bind material good!")
+				if material.bindings[Mat_Idx.BASE].texture == nil {
+					panic("mat base was nil")
+				}
+				if material.bindings[Mat_Idx.EMISSIVE].texture == nil {
+					panic("mat base was nil")
+				}
 			}
 
 			mesh := glist.get(&r._meshes, glist.Glist_Idx(mesh_idx))
@@ -758,7 +767,9 @@ draw :: proc(
 				draw_instances,
 				first_draw_index,
 			)
-
+			if render_pass == nil {
+				panic("render pass was nil")
+			}
 			sdl.DrawGPUIndexedPrimitives(
 				render_pass,
 				mesh.num_idxs,
