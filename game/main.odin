@@ -72,7 +72,7 @@ main :: proc() {
 	bananers := make([dynamic]pool.Pool_Key, 0, 1)
 
 	for _ in 0 ..< 1 {
-		spawn(&r, &bananers, "vehicle-drag-racer")
+		spawn(&r, &bananers, "vehicle-monster-truck")
 		// spawn(&r, &bananers, "item-box")
 	}
 

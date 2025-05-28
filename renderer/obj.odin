@@ -10,14 +10,14 @@ import "core:strconv"
 import "core:strings"
 
 Face :: struct {
-	pos:    uint,
-	uv:     uint,
-	normal: uint,
+	pos_idx:    uint,
+	uv_idx:     uint,
+	normal_idx: uint,
 }
 
 Mesh :: struct {
 	verts: []Vertex_Data,
-	idxs:  [dynamic]u16,
+	idxs:  []u16,
 }
 Vertex_Data :: struct {
 	pos:    [3]f32,
@@ -37,9 +37,14 @@ obj_load :: proc(file_name: string) -> (mesh: Mesh) {
 	scanner: bufio.Scanner
 	bufio.scanner_init(&scanner, s)
 	defer bufio.scanner_destroy(&scanner)
-	positions: [dynamic][3]f32
-	uvs: [dynamic][2]f32
-	normals: [dynamic][3]f32
+	positions := make([dynamic][3]f32)
+	defer delete(positions)
+	uvs := make([dynamic][2]f32)
+	defer delete(uvs)
+	normals := make([dynamic][3]f32)
+	defer delete(normals)
+	faces := make([dynamic][3]Face)
+	defer delete(faces)
 	line_no := 0
 	for bufio.scanner_scan(&scanner) {
 		line := bufio.scanner_text(&scanner)
@@ -49,9 +54,6 @@ obj_load :: proc(file_name: string) -> (mesh: Mesh) {
 		case 'v':
 			switch line[1] {
 			case ' ':
-				if positions == nil {
-					positions = make([dynamic][3]f32, allocator = context.temp_allocator)
-				}
 				pos, err := parse_f32s(3, line[2:])
 				if err != nil {
 					log.panicf(
@@ -63,9 +65,6 @@ obj_load :: proc(file_name: string) -> (mesh: Mesh) {
 				}
 				append(&positions, pos)
 			case 't':
-				if uvs == nil {
-					uvs = make([dynamic][2]f32, allocator = context.temp_allocator)
-				}
 				uv, err := parse_f32s(2, line[3:])
 				if err != nil {
 					log.panicf(
@@ -77,9 +76,6 @@ obj_load :: proc(file_name: string) -> (mesh: Mesh) {
 				}
 				append(&uvs, uv)
 			case 'n':
-				if normals == nil {
-					normals = make([dynamic][3]f32, allocator = context.temp_allocator)
-				}
 				normal, err := parse_f32s(3, line[3:])
 				if err != nil {
 					log.panicf(
@@ -92,20 +88,7 @@ obj_load :: proc(file_name: string) -> (mesh: Mesh) {
 				append(&normals, normal)
 			}
 		case 'f':
-			if mesh.verts == nil {
-				mesh.verts = make(
-					[]Vertex_Data,
-					len(positions),
-					allocator = context.temp_allocator,
-				)
-				mesh.idxs = make(
-					[dynamic]u16,
-					0,
-					len(positions),
-					allocator = context.temp_allocator,
-				)
-			}
-			faces, err := parse_faces(line[2:])
+			parsed_faces, err := parse_faces(line[2:])
 			if err != nil {
 				log.panicf(
 					"err in parsing %s face, on line %d, reason: %v",
@@ -114,19 +97,25 @@ obj_load :: proc(file_name: string) -> (mesh: Mesh) {
 					err,
 				)
 			}
-			// bean: [3]u16
-			for face, i in faces {
-				mesh.verts[face.pos] = Vertex_Data {
-					pos    = positions[face.pos],
-					uv     = uvs[face.uv],
-					normal = normals[face.normal],
-				}
-				// bean[i] = u16(face.pos)
-				append(&mesh.idxs, u16(face.pos))
-			}
-		// log.debugf("%v", bean)
+			append(&faces, parsed_faces)
 		}
 	}
+	// log.debug("done parsing obj!")
+	mesh.verts = make([]Vertex_Data, len(faces) * 3, allocator = context.temp_allocator)
+	mesh.idxs = make([]u16, len(faces) * 3, allocator = context.temp_allocator)
+	vert_idx := 0
+	for face in faces {
+		for vert in face {
+			mesh.verts[vert_idx] = Vertex_Data {
+				pos    = positions[vert.pos_idx],
+				uv     = uvs[vert.uv_idx],
+				normal = normals[vert.normal_idx],
+			}
+			mesh.idxs[vert_idx] = u16(vert_idx)
+			vert_idx += 1
+		}
+	}
+	// log.debug("done linking faces!")
 	return
 }
 
@@ -199,9 +188,9 @@ parse_faces :: proc(s: string) -> (faces: [3]Face, err: Parse_Err) {
 			}
 			numbas[i] -= 1
 		}
-		faces[i].pos = numbas[0]
-		faces[i].uv = numbas[1]
-		faces[i].normal = numbas[2]
+		faces[i].pos_idx = numbas[0]
+		faces[i].uv_idx = numbas[1]
+		faces[i].normal_idx = numbas[2]
 	}
 	return
 }

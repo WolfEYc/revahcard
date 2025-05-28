@@ -35,13 +35,13 @@ void main() {
     for (int i = 0; i < rendered_lights; ++i) {
         Light light = lights[i];
         vec3 vec_to_light = light.pos - pos;
-        float dist_to_light = length(vec_to_light);
-        vec3 dir_to_light = vec_to_light / dist_to_light;
-        float angle_factor = dot(dir_to_light, surface_normal);
+        float sqr_dist_light = dot(vec_to_light, vec_to_light);
+        float inv_dist_light = inversesqrt(sqr_dist_to_light)
+        float angle_factor = dot(vec_to_light, surface_normal) * inv_dist_light;
         if (angle_factor <= 0) {
             continue;
         }
-        float attenuation_factor = 1 / (dist_to_light * dist_to_light);
+        float attenuation_factor = 1 / sqr_dist_light;
         vec3 incoming_radiance = light.color * light.intensity;
         vec3 irradiance = incoming_radiance * angle_factor * attenuation_factor;
         vec3 brdf = vec3(1);
