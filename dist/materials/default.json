@@ -1,4 +1,6 @@
 {
-    "base": "variation-a.png",
+    "diffuse": "variation-a.png",
+    "metal_rough": "black.png",
+    "specular": "white.png",
     "emissive": "black.png"
 }

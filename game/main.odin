@@ -28,9 +28,9 @@ main :: proc() {
 		1080,
 		{.FULLSCREEN},
 	);sdle.sdl_err(window)
-	r, err := renderer.new(gpu, window)
+	r, err := renderer.init(gpu, window)
 	if err != nil do log.panic(err)
-	err = renderer.load_all_assets(&r)
+	err = renderer.load_all_assets(r)
 	if err != nil do log.panic(err)
 
 	spawn :: proc(r: ^renderer.Renderer, bananers: ^[dynamic]pool.Pool_Key, model: string) {
@@ -72,14 +72,14 @@ main :: proc() {
 	bananers := make([dynamic]pool.Pool_Key, 0, 1)
 
 	for _ in 0 ..< 1 {
-		spawn(&r, &bananers, "vehicle-monster-truck")
-		// spawn(&r, &bananers, "item-box")
+		spawn(r, &bananers, "vehicle-monster-truck")
+		// spawn(r, &bananers, "item-box")
 	}
 
-	light := spawn_light(&r, {0, 0, 0})
+	light := spawn_light(r, {0, 0, -5})
 
-	renderer.flush_nodes(&r)
-	renderer.flush_lights(&r)
+	renderer.flush_nodes(r)
+	renderer.flush_lights(r)
 	last_ticks := sdl.GetTicks()
 
 	main_loop: for {
@@ -98,7 +98,7 @@ main :: proc() {
 		}
 		// update game state
 		for banana_key in bananers {
-			banana, ok := renderer.get_node(&r, banana_key);assert(ok)
+			banana, ok := renderer.get_node(r, banana_key);assert(ok)
 			x_rotation_amt := lal.to_radians(f32(45) * delta_time)
 			y_rotation_amt := lal.to_radians(f32(90) * delta_time)
 			z_rotation_amt := lal.to_radians(f32(15) * delta_time)
@@ -116,9 +116,9 @@ main :: proc() {
 		// r.camera.pos.y -= f32(0.1) * delta_time
 
 		// render
-		renderer.flush_nodes(&r)
-		renderer.flush_lights(&r)
-		renderer.render(&r)
+		renderer.flush_nodes(r)
+		renderer.flush_lights(r)
+		renderer.render(r)
 	}
 }
 

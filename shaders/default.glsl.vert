@@ -1,7 +1,8 @@
 #version 460
 
 layout(set=0, binding=0) readonly buffer Mvp_Buffer {
-    mat4 ms[4096];
+    mat4 ms[4096]; // model matrices
+    mat4 ns[4096]; // normal matrices
 };
 
 layout(set=1, binding=0) uniform Vert_UBO {
@@ -22,6 +23,7 @@ void main() {
     gl_Position = vp * world_pos;
     out_pos = world_pos.xyz;
     out_uv = uv;
-    vec4 world_normal = m * vec4(normal, 0);
-    out_normal = normalize(world_normal.xyz); // TODO use normal matrix to support non-uniform scale
+    mat4 n = ns[gl_InstanceIndex];
+    vec4 world_normal = n * vec4(normal, 0);
+    out_normal = world_normal.xyz;
 }
