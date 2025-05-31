@@ -82,7 +82,7 @@ load_shader :: proc(
 			num_storage_buffers = info.storage_buffers,
 			num_storage_textures = info.storage_textures,
 		},
-	);sdle.sdl_err(shader)
+	);sdle.err(shader)
 	return
 }
 

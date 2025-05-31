@@ -9,7 +9,7 @@ sdl_nil_panic :: #force_inline proc(ptr: rawptr, location:= #caller_location ) {
 	if ptr == nil do log.panicf("SDL Error: {}", sdl.GetError(), location=location)
 }
 
-sdl_err :: proc {
+err :: proc {
 	sdl_ok_panic,
 	sdl_nil_panic,
 }

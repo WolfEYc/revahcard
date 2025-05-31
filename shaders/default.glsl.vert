@@ -25,5 +25,5 @@ void main() {
     out_uv = uv;
     mat4 n = ns[gl_InstanceIndex];
     vec4 world_normal = n * vec4(normal, 0);
-    out_normal = world_normal.xyz;
+    out_normal = normalize(world_normal.xyz);
 }

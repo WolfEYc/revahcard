@@ -10,24 +10,31 @@ import "core:math/rand"
 import "core:mem"
 import sdl "vendor:sdl3"
 
+GameState :: struct {
+	deltatime:   f32,
+	movedir:     [2]f32,
+	mouse_delta: [2]f32,
+	rot:         [3]f32, // yaw pitch roll
+	freecam:     bool,
+}
 
 main :: proc() {
 	context.logger = log.create_console_logger()
-	when ODIN_DEBUG == true {
+	when ODIN_DEBUG {
 		sdl.SetLogPriorities(.VERBOSE)
 		sdl.SetHint(sdl.HINT_RENDER_VULKAN_DEBUG, "1")
 	}
 
 	// init sdl
-	ok := sdl.Init({.VIDEO});sdle.sdl_err(ok)
+	ok := sdl.Init({.VIDEO});sdle.err(ok)
 
-	gpu := sdl.CreateGPUDevice({.SPIRV}, true, "vulkan");sdle.sdl_err(gpu)
+	gpu := sdl.CreateGPUDevice({.SPIRV}, true, "vulkan");sdle.err(gpu)
 	window := sdl.CreateWindow(
 		"Hello Triangle SDL3 Yay",
 		1920,
 		1080,
 		{.FULLSCREEN},
-	);sdle.sdl_err(window)
+	);sdle.err(window)
 	r, err := renderer.init(gpu, window)
 	if err != nil do log.panic(err)
 	err = renderer.load_all_assets(r)
@@ -76,15 +83,16 @@ main :: proc() {
 		// spawn(r, &bananers, "item-box")
 	}
 
-	light := spawn_light(r, {0, 0, -5})
+	light := spawn_light(r, {0, 0, -3})
 
 	renderer.flush_nodes(r)
 	renderer.flush_lights(r)
 	last_ticks := sdl.GetTicks()
+	s := GameState{}
 
 	main_loop: for {
 		new_ticks := sdl.GetTicks()
-		delta_time := f32(new_ticks - last_ticks) / 1000
+		s.deltatime = f32(new_ticks - last_ticks) / 1000
 		last_ticks = new_ticks
 		// process events
 		ev: sdl.Event
@@ -93,15 +101,19 @@ main :: proc() {
 			case .QUIT:
 				break main_loop
 			case .KEY_DOWN:
-				if ev.key.scancode == .ESCAPE do break main_loop
+				#partial switch ev.key.scancode {
+				case .ESCAPE:
+					break main_loop
+				}
 			}
+			freecam_eventhandle(&s, r, ev)
 		}
 		// update game state
 		for banana_key in bananers {
 			banana, ok := renderer.get_node(r, banana_key);assert(ok)
-			x_rotation_amt := lal.to_radians(f32(45) * delta_time)
-			y_rotation_amt := lal.to_radians(f32(90) * delta_time)
-			z_rotation_amt := lal.to_radians(f32(15) * delta_time)
+			x_rotation_amt := lal.to_radians(f32(45) * s.deltatime)
+			y_rotation_amt := lal.to_radians(f32(90) * s.deltatime)
+			z_rotation_amt := lal.to_radians(f32(15) * s.deltatime)
 			// log.debugf("rot_amt=%.2f", rotation_amt)
 			rot_apply := lal.quaternion_from_euler_angles_f32(
 				x_rotation_amt,
@@ -112,8 +124,8 @@ main :: proc() {
 			banana.rot = rot_apply * banana.rot
 		}
 
-		// r.camera.pos.x += f32(0.1) * delta_time
-		// r.camera.pos.y -= f32(0.1) * delta_time
+		// update camera
+		freecam_system(&s, r)
 
 		// render
 		renderer.flush_nodes(r)
