@@ -399,7 +399,7 @@ load_texture :: proc(r: ^Renderer, file_name: string) -> (tex: sdl.GPUTextureSam
 		disk_surface,
 		.RGBA32,
 		palette,
-		.SRGB,
+		.SRGB_LINEAR,
 		0,
 	);sdle.err(surface)
 	sdl.DestroySurface(disk_surface)
@@ -416,7 +416,7 @@ load_texture :: proc(r: ^Renderer, file_name: string) -> (tex: sdl.GPUTextureSam
 		r._gpu,
 		{
 			type = .D2,
-			format = .R8G8B8A8_UNORM_SRGB,
+			format = .R8G8B8A8_UNORM,
 			usage = {.SAMPLER},
 			width = width,
 			height = height,
