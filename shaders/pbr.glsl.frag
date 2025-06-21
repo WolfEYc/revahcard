@@ -7,10 +7,8 @@ layout(set=2, binding=1) uniform sampler2D normal_sampler;
 layout(set=2, binding=2) uniform sampler2D orm_sampler;
 layout(set=2, binding=3) uniform sampler2D emissive_sampler;
 
-// vec4 for padding
 struct Light {
-    vec3 pos;
-    float _pad;
+    vec4 pos;
     vec4 color;
 };
 
@@ -87,7 +85,7 @@ void main() {
     vec3 color = vec3(0.0);
     for (uint i = 0; i < rendered_lights; i++) {
         Light light = lights[i];
-        vec3 vec_to_light = light.pos - in_world_pos
+        vec3 vec_to_light = light.pos.xyz - in_world_pos
     ;
         float sqr_to_light = dot(vec_to_light, vec_to_light);
         float attenuation = 1.0 / sqr_to_light;

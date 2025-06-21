@@ -42,14 +42,8 @@ Renderer :: struct {
 	_pipeline:                  ^sdl.GPUGraphicsPipeline,
 	_proj_mat:                  matrix[4, 4]f32,
 	_depth_tex:                 ^sdl.GPUTexture,
-
-	// nodes
+	_models:                    glist.Glist(Model),
 	_nodes:                     pool.Pool(Node),
-	_meshes:                    glist.Glist(GPU_Mesh),
-	_materials:                 glist.Glist(GPU_Material),
-	_mesh_catalog:              map[string]glist.Glist_Idx,
-	_material_catalog:          map[string]glist.Glist_Idx,
-	_texture_catalog:           map[string]sdl.GPUTextureSamplerBinding,
 	//                      material   mesh    node
 	_render_map:                [dynamic][dynamic][dynamic]pool.Pool_Key,
 
@@ -63,8 +57,8 @@ Renderer :: struct {
 	_transform_transfer_buffer: ^sdl.GPUTransferBuffer,
 
 	// lights storage buf
-	_lights_buffer:             [MAX_RENDER_LIGHTS]GPU_Light,
-	_lights:                    pool.Pool(GPU_Light),
+	_lights_buffer:             [MAX_RENDER_LIGHTS]GPU_Point_Light,
+	_lights:                    pool.Pool(GPU_Point_Light),
 	_lights_gpu_buffer:         ^sdl.GPUBuffer,
 	_lights_transfer_buffer:    ^sdl.GPUTransferBuffer,
 
@@ -82,30 +76,35 @@ Camera :: struct {
 	target: [3]f32,
 }
 
+GPU_Point_Light :: struct #align (32) {
+	pos:   [4]f32, // 16
+	// _pad:  f32, // 4
+	color: [4]f32, // 16
+	// intensity: f32, // 4
+}
+
 Node :: struct {
 	_global_transform: matrix[4, 4]f32,
 	rot:               quaternion128,
 	pos:               [3]f32,
 	scale:             [3]f32,
+	model:             glist.Glist_Idx,
 	parent:            pool.Pool_Key,
-	light:             pool.Pool_Key,
-	_mesh:             glist.Glist_Idx,
-	_material:         glist.Glist_Idx,
 	_visited:          bool,
-	lit:               bool,
 	visible:           bool,
+	lit:               bool,
 }
 
-GPU_Light :: struct #align (32) {
-	pos:       [3]f32, // 12
-	range:     f32, // 4
-	color:     [3]f32, // 12
-	intensity: f32, // 4
+Model :: struct {
+	meshes:    []GPU_Mesh,
+	materials: []GPU_Material,
+	top_nodes: []gltf.Node,
 }
 
 GPU_Mesh :: struct {
 	vert_buf: ^sdl.GPUBuffer,
 	idx_buf:  ^sdl.GPUBuffer,
+	material: gltf.Integer,
 	num_idxs: u32,
 }
 Mat_Idx :: enum {
@@ -218,11 +217,6 @@ init :: proc(
 	init_render_pipeline(r)
 
 	r._nodes = pool.make(Node, MAX_NODE_COUNT) or_return
-	r._meshes = glist.make(GPU_Mesh, MAX_MESH_COUNT) or_return
-	r._materials = glist.make(GPU_Material, MAX_MATERIAL_COUNT) or_return
-	r._mesh_catalog = make(map[string]glist.Glist_Idx)
-	r._material_catalog = make(map[string]glist.Glist_Idx)
-	r._texture_catalog = make(map[string]sdl.GPUTextureSamplerBinding)
 
 	win_size: [2]i32
 	ok = sdl.GetWindowSize(window, &win_size.x, &win_size.y);sdle.err(ok)
@@ -258,7 +252,7 @@ init :: proc(
 	);sdle.err(r._transform_transfer_buffer)
 
 	lights_size := u32(size_of(r._lights_buffer))
-	r._lights = pool.make(GPU_Light, MAX_LIGHT_COUNT) or_return
+	r._lights = pool.make(GPU_Point_Light, MAX_LIGHT_COUNT) or_return
 	r._lights_gpu_buffer = sdl.CreateGPUBuffer(
 		r._gpu,
 		{usage = {.GRAPHICS_STORAGE_READ}, size = lights_size},
@@ -314,7 +308,7 @@ upload_mesh_to_gpu :: proc(
 	r: ^Renderer,
 	mesh: Mesh,
 ) -> (
-	idx: glist.Glist_Idx,
+	gpu_mesh: GPU_Mesh,
 	err: runtime.Allocator_Error,
 ) {
 	idxs_size := len(mesh.idxs) * size_of(u16)
@@ -322,7 +316,6 @@ upload_mesh_to_gpu :: proc(
 	verts_size_u32 := u32(verts_size)
 	idx_byte_size_u32 := u32(idxs_size)
 
-	gpu_mesh: GPU_Mesh
 	gpu_mesh.num_idxs = u32(len(mesh.idxs))
 	gpu_mesh.vert_buf = sdl.CreateGPUBuffer(
 		r._gpu,
@@ -333,7 +326,6 @@ upload_mesh_to_gpu :: proc(
 		{usage = {.INDEX}, size = idx_byte_size_u32},
 	);sdle.err(gpu_mesh.idx_buf)
 
-	idx = glist.insert(&r._meshes, gpu_mesh) or_return
 	transfer_buf := sdl.CreateGPUTransferBuffer(
 		r._gpu,
 		{usage = .UPLOAD, size = verts_size_u32 + idx_byte_size_u32},
@@ -402,6 +394,11 @@ load_glb :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Err
 	}
 	defer gltf.unload(data)
 
+	model := Model {
+		meshes    = make([]GPU_Mesh, len(data.meshes)),
+		top_nodes = make([]gltf.Node, len(data.nodes)),
+	}
+	// meshes
 	for gltf_mesh, mesh_idx in data.meshes {
 		glb_ctx.mesh_name = gltf_mesh.name.?
 		glb_ctx.mesh_idx = mesh_idx
@@ -422,16 +419,19 @@ load_glb :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Err
 			defer runtime.default_temp_allocator_temp_end(temp_mem)
 			mesh: Mesh
 			mesh.verts = make([]Vertex_Data, num_verts, allocator = context.temp_allocator)
+
+			// Vertex SOA -> AOS
 			for i := 0; i < num_verts; i += 1 {
 				mesh.verts[i].pos = pos_buf[i]
 				mesh.verts[i].uv = uv_buf[i]
 				mesh.verts[i].normal = norm_buf[i]
 			}
 			mesh.idxs = gltf.buffer_slice(data, indices_idx).([]u16)
+			// calc tangent
 			for i := 0; i < len(mesh.idxs); i += 3 {
-				v0 := mesh.verts[mesh.idxs[i]]
-				v1 := mesh.verts[mesh.idxs[i + 1]]
-				v2 := mesh.verts[mesh.idxs[i + 2]]
+				v0 := &mesh.verts[mesh.idxs[i]]
+				v1 := &mesh.verts[mesh.idxs[i + 1]]
+				v2 := &mesh.verts[mesh.idxs[i + 2]]
 
 				edge1 := v1.pos - v0.pos
 				edge2 := v2.pos - v0.pos
@@ -447,13 +447,22 @@ load_glb :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Err
 				v1.tangent += tangent
 				v2.tangent += tangent
 			}
-
 			for i := 0; i < num_verts; i += 1 {
 				mesh.verts[i].tangent = lal.normalize(mesh.verts[i].tangent)
 			}
-			// TODO upload
+			gpu_mesh := upload_mesh_to_gpu(r, mesh) or_return
+			model.meshes[mesh_idx] = gpu_mesh
+		} // end primitive
+	} // end mesh
+
+	for node, node_idx in data.nodes {
+		node.children
+		lights_ext, ok := node.extensions.(json.Object)["KHR_lights_punctual"]
+		if ok {
+
 		}
 	}
+
 
 	return
 }
@@ -538,7 +547,7 @@ Material_Meta :: struct {
 	emissive:    string `json:"emissive"`,
 }
 
-load_material :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Error) {
+load_material :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
 	temp_mem := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
 	log.infof("loading material: %s", file_name)
@@ -604,9 +613,7 @@ make_node :: proc(
 	pos := [3]f32{0, 0, 0},
 	rot := lal.QUATERNIONF32_IDENTITY,
 	scale := [3]f32{1, 1, 1},
-	material_name := "default",
 	parent := pool.Pool_Key{},
-	light := pool.Pool_Key{},
 	visible := true,
 ) -> (
 	key: pool.Pool_Key,
@@ -618,28 +625,14 @@ make_node :: proc(
 	node.pos = pos
 	node.rot = rot
 	node.scale = scale
-	Anode.visiblee = visible
-	node.light = light
-	node._mesh, ok = r._mesh_catalog[model_name]
-	if !ok {
-		err = .Mesh_Not_Found
-		return
-	}
-	node._material, ok = r._material_catalog[material_name]
-	if !ok {
-		err = .Material_Not_Found
-		return
-	}
-	if light.gen != 0 {
-		node.lit = true
-	}
+	node.visible = visible
 	key = pool.insert_defered(&r._nodes, node) or_return
 	return
 }
 
 make_light :: proc(
 	r: ^Renderer,
-	light: GPU_Light,
+	light: GPU_Point_Light,
 ) -> (
 	key: pool.Pool_Key,
 	err: runtime.Allocator_Error,
@@ -915,7 +908,7 @@ upload_lights_buffer :: proc(r: ^Renderer) {
 	if r._lights_rendered == 0 {
 		return
 	}
-	size := size_of(GPU_Light) * r._lights_rendered
+	size := size_of(GPU_Point_Light) * r._lights_rendered
 
 	transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
 		r._gpu,
