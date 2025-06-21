@@ -1,0 +1,3 @@
+[submodule "lib/glTF2"]
+	path = lib/glTF2
+	url = https://github.com/Pawel82S/glTF2.git

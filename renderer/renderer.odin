@@ -5,6 +5,7 @@ import "../lib/pool"
 import sdl "vendor:sdl3"
 import sdli "vendor:sdl3/image"
 
+import gltf "../lib/glTF2"
 import "../lib/sdle"
 import "base:runtime"
 import "core:encoding/json"
@@ -22,9 +23,7 @@ dist_dir :: "dist"
 out_shader_ext :: "spv"
 texture_dir :: "textures"
 model_dir :: "models"
-material_dir :: "materials"
-materials_dist_dir :: dist_dir + os.Path_Separator_String + material_dir
-mesh_dist_dir :: dist_dir + os.Path_Separator_String + model_dir
+model_dist_dir :: dist_dir + os.Path_Separator_String + model_dir
 
 
 MAX_NODE_COUNT :: 65536
@@ -110,9 +109,9 @@ GPU_Mesh :: struct {
 	num_idxs: u32,
 }
 Mat_Idx :: enum {
-	DIFFUSE,
-	METAL_ROUGH,
-	SPECULAR,
+	ALBEDO,
+	NORMAL,
+	ORM,
 	EMISSIVE,
 }
 GPU_Material :: struct {
@@ -128,7 +127,7 @@ Frag_UBO :: struct {
 }
 Transform_Storage_Buffer :: struct {
 	ms: [MAX_RENDER_NODES]matrix[4, 4]f32,
-	ns: [MAX_RENDER_NODES]matrix[4, 4]f32,
+	// ns: [MAX_RENDER_NODES]matrix[4, 4]f32,
 }
 
 GPU_DEPTH_TEX_FMT :: sdl.GPUTextureFormat.D24_UNORM
@@ -150,6 +149,7 @@ init_render_pipeline :: proc(r: ^Renderer) {
 		{location = 0, format = .FLOAT3, offset = u32(offset_of(Vertex_Data, pos))},
 		{location = 1, format = .FLOAT2, offset = u32(offset_of(Vertex_Data, uv))},
 		{location = 2, format = .FLOAT3, offset = u32(offset_of(Vertex_Data, normal))},
+		{location = 3, format = .FLOAT3, offset = u32(offset_of(Vertex_Data, tangent))},
 	}
 	r._pipeline = sdl.CreateGPUGraphicsPipeline(
 		r._gpu,
@@ -292,28 +292,31 @@ end_copy_pass :: proc(r: ^Renderer) {
 
 load_all_assets :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
 	start_copy_pass(r)
-	load_all_materials(r) or_return
-	load_all_meshes(r) or_return
+	load_all_models(r) or_return
 	end_copy_pass(r)
 	return
 }
 
-load_mesh :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Error) {
-	assert(r._copy_pass != nil)
-	assert(r._copy_cmd_buf != nil)
-	temp_mem := runtime.default_temp_allocator_temp_begin()
-	defer runtime.default_temp_allocator_temp_end(temp_mem)
-	log.infof("loading mesh: %s", file_name)
-	mesh := obj_load(file_name)
-	// log.debugf("num_idxs=%d", len(mesh.idxs))
+load_all_models :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
+	f, ferr := os.open(model_dist_dir)
+	if err != nil {
+		log.panicf("err in opening %s to load all models, reason: %v", model_dist_dir, ferr)
+	}
+	it := os.read_directory_iterator_create(f)
+	for file_info in os.read_directory_iterator(&it) {
+		load_glb(r, file_info.name) or_return
+	}
+	os.read_directory_iterator_destroy(&it)
+	return
+}
 
-	// for v in mesh.verts {
-	// 	log.infof("%v", v)
-	// }
-	// for i := 0; i < len(mesh.idxs); i += 3 {
-	// 	log.infof("%d %d, %d", mesh.idxs[i], mesh.idxs[i + 1], mesh.idxs[i + 2])
-	// }
-
+upload_mesh_to_gpu :: proc(
+	r: ^Renderer,
+	mesh: Mesh,
+) -> (
+	idx: glist.Glist_Idx,
+	err: runtime.Allocator_Error,
+) {
 	idxs_size := len(mesh.idxs) * size_of(u16)
 	verts_size := len(mesh.verts) * size_of(Vertex_Data)
 	verts_size_u32 := u32(verts_size)
@@ -330,7 +333,7 @@ load_mesh :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		{usage = {.INDEX}, size = idx_byte_size_u32},
 	);sdle.err(gpu_mesh.idx_buf)
 
-	idx := glist.insert(&r._meshes, gpu_mesh) or_return
+	idx = glist.insert(&r._meshes, gpu_mesh) or_return
 	transfer_buf := sdl.CreateGPUTransferBuffer(
 		r._gpu,
 		{usage = .UPLOAD, size = verts_size_u32 + idx_byte_size_u32},
@@ -360,24 +363,101 @@ load_mesh :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		{buffer = gpu_mesh.idx_buf, size = idx_byte_size_u32},
 		false,
 	)
-	mesh_name := filepath.short_stem(file_name)
-	mesh_name = strings.clone(mesh_name)
-	r._mesh_catalog[mesh_name] = idx
 	return
 }
 
-load_all_meshes :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
-	f, ferr := os.open(mesh_dist_dir)
-	if err != nil {
-		log.panicf("err in opening %s to load all meshes, reason: %v", mesh_dist_dir, ferr)
+
+load_glb :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Error) {
+	GLB_Ctx :: struct {
+		file_name:     string,
+		mesh_name:     string,
+		mesh_idx:      int,
+		primitive_idx: int,
 	}
-	it := os.read_directory_iterator_create(f)
-	for file_info in os.read_directory_iterator(&it) {
-		load_mesh(r, file_info.name) or_return
+	mesh_err_fmt :: "err loading model=%s, mesh_name=%s mesh_idx=%d primitive=%d missing %s attr"
+	get_primitive_attr :: proc(
+		glb_ctx: GLB_Ctx,
+		primitive: gltf.Mesh_Primitive,
+		attr: string,
+	) -> (
+		accessor: gltf.Integer,
+	) {
+		ok: bool
+		accessor, ok = primitive.attributes[attr]
+		if !ok do log.panicf(mesh_err_fmt, glb_ctx.file_name, glb_ctx.mesh_name, glb_ctx.mesh_idx, glb_ctx.primitive_idx, attr)
+		return
 	}
-	os.read_directory_iterator_destroy(&it)
+	glb_ctx: GLB_Ctx
+	glb_ctx.file_name = file_name
+
+	assert(r._copy_pass != nil)
+	assert(r._copy_cmd_buf != nil)
+	temp_mem := runtime.default_temp_allocator_temp_begin()
+	defer runtime.default_temp_allocator_temp_end(temp_mem)
+	log.infof("loading model: %s", file_name)
+
+	data, load_err := gltf.load_from_file(file_name)
+	if load_err != nil {
+		log.panicf("err loading model %s, reason: %v", file_name, load_err)
+	}
+	defer gltf.unload(data)
+
+	for gltf_mesh, mesh_idx in data.meshes {
+		glb_ctx.mesh_name = gltf_mesh.name.?
+		glb_ctx.mesh_idx = mesh_idx
+		for primitive, primitive_idx in gltf_mesh.primitives {
+			glb_ctx.primitive_idx = primitive_idx
+			indices_idx, has_idxs := primitive.indices.?
+			if !has_idxs do log.panicf(mesh_err_fmt, glb_ctx.file_name, glb_ctx.mesh_name, glb_ctx.mesh_idx, glb_ctx.primitive_idx, "indicies")
+			pos_idx := get_primitive_attr(glb_ctx, primitive, "POSITION")
+			normal_idx := get_primitive_attr(glb_ctx, primitive, "NORMAL")
+			uv_idx := get_primitive_attr(glb_ctx, primitive, "TEXCOORD_0")
+
+			pos_buf := gltf.buffer_slice(data, pos_idx).([][3]f32)
+			norm_buf := gltf.buffer_slice(data, normal_idx).([][3]f32)
+			uv_buf := gltf.buffer_slice(data, uv_idx).([][2]f32)
+
+			num_verts := len(pos_buf)
+			temp_mem := runtime.default_temp_allocator_temp_begin()
+			defer runtime.default_temp_allocator_temp_end(temp_mem)
+			mesh: Mesh
+			mesh.verts = make([]Vertex_Data, num_verts, allocator = context.temp_allocator)
+			for i := 0; i < num_verts; i += 1 {
+				mesh.verts[i].pos = pos_buf[i]
+				mesh.verts[i].uv = uv_buf[i]
+				mesh.verts[i].normal = norm_buf[i]
+			}
+			mesh.idxs = gltf.buffer_slice(data, indices_idx).([]u16)
+			for i := 0; i < len(mesh.idxs); i += 3 {
+				v0 := mesh.verts[mesh.idxs[i]]
+				v1 := mesh.verts[mesh.idxs[i + 1]]
+				v2 := mesh.verts[mesh.idxs[i + 2]]
+
+				edge1 := v1.pos - v0.pos
+				edge2 := v2.pos - v0.pos
+
+				delta_1 := v1.uv - v0.uv
+				delta_2 := v2.uv - v0.uv
+
+				f := 1.0 / (delta_1.x * delta_2.y - delta_2.x * delta_1.y)
+				tangent := f * (delta_2.y * edge1 - delta_1.y * edge2)
+				// bitangent := f * (-delta_2.x * edge1 + delta_1.x * edge2)
+
+				v0.tangent += tangent
+				v1.tangent += tangent
+				v2.tangent += tangent
+			}
+
+			for i := 0; i < num_verts; i += 1 {
+				mesh.verts[i].tangent = lal.normalize(mesh.verts[i].tangent)
+			}
+			// TODO upload
+		}
+	}
+
 	return
 }
+
 
 @(private)
 load_texture :: proc(r: ^Renderer, file_name: string) -> (tex: sdl.GPUTextureSamplerBinding) {
@@ -488,28 +568,15 @@ load_material :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocato
 	}
 
 	material: GPU_Material
-	material.bindings[Mat_Idx.DIFFUSE] = load_texture(r, meta.diffuse)
-	material.bindings[Mat_Idx.METAL_ROUGH] = load_texture(r, meta.metal_rough)
-	material.bindings[Mat_Idx.SPECULAR] = load_texture(r, meta.specular)
+	material.bindings[Mat_Idx.ALBEDO] = load_texture(r, meta.diffuse)
+	material.bindings[Mat_Idx.NORMAL] = load_texture(r, meta.metal_rough)
+	material.bindings[Mat_Idx.ORM] = load_texture(r, meta.specular)
 	material.bindings[Mat_Idx.EMISSIVE] = load_texture(r, meta.emissive)
 
 	idx := glist.insert(&r._materials, material) or_return
 	material_name := filepath.short_stem(file_name)
 	material_name = strings.clone(material_name)
 	r._material_catalog[material_name] = idx
-	return
-}
-
-load_all_materials :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
-	f, ferr := os.open(materials_dist_dir)
-	if err != nil {
-		log.panicf("err in opening materials dist dir to load all materials, reason: %v", ferr)
-	}
-	it := os.read_directory_iterator_create(f)
-	for file_info in os.read_directory_iterator(&it) {
-		load_material(r, file_info.name) or_return
-	}
-	os.read_directory_iterator_destroy(&it)
 	return
 }
 
@@ -551,7 +618,7 @@ make_node :: proc(
 	node.pos = pos
 	node.rot = rot
 	node.scale = scale
-	node.visible = visible
+	Anode.visiblee = visible
 	node.light = light
 	node._mesh, ok = r._mesh_catalog[model_name]
 	if !ok {

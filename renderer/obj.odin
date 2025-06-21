@@ -20,9 +20,10 @@ Mesh :: struct {
 	idxs:  []u16,
 }
 Vertex_Data :: struct {
-	pos:    [3]f32,
-	uv:     [2]f32,
-	normal: [3]f32,
+	pos:     [3]f32,
+	uv:      [2]f32,
+	normal:  [3]f32,
+	tangent: [3]f32,
 }
 obj_load :: proc(file_name: string) -> (mesh: Mesh) {
 	file_path := filepath.join(
