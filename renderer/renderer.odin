@@ -42,8 +42,7 @@ Renderer :: struct {
 	_pipeline:                  ^sdl.GPUGraphicsPipeline,
 	_proj_mat:                  matrix[4, 4]f32,
 	_depth_tex:                 ^sdl.GPUTexture,
-	_meshes:                    glist.Glist(GPU_Mesh),
-	_materials:                 glist.Glist(GPU_Material),
+	_models:                    glist.Glist(Model),
 	_nodes:                     pool.Pool(Node),
 	_node_map:                  map[string]pool.Pool_Key,
 	//                           material   mesh    node
@@ -86,36 +85,37 @@ GPU_Point_Light :: struct #align (32) {
 }
 
 
-Node :: struct {
-	_global_mat: matrix[4, 4]f32,
+Model :: struct {
+	buffers:   []^sdl.GPUBuffer,
+	accessors: []Model_Accessor,
+	meshes:    []Model_Mesh,
+	nodes:     []Model_Node,
+}
+
+Model_Accessor :: struct {
+	buffer: u32,
+	offset: u32,
+}
+
+Model_Mesh :: struct {
+	primitives: []Model_Primitive,
+}
+// indexes to accessors
+Model_Primitive :: struct {
+	pos:      u32,
+	uv:       u32,
+	normal:   u32,
+	tangent:  u32,
+	indices:  u32,
+	material: u32,
+}
+Model_Node :: struct {
 	pos:         [3]f32,
 	scale:       [3]f32,
 	rot:         quaternion128,
-	light_color: [4]f32,
-	mesh:        glist.Glist_Idx,
-	material:    glist.Glist_Idx,
-	_visited:    bool,
-	visible:     bool,
-	lit:         bool,
-	children:    []pool.Pool_Key,
-}
-Primitive :: struct {
-	pos:     [][3]f32,
-	uv:      [][2]f32,
-	normal:  [][3]f32,
-	tangent: [][3]f32,
-	idxs:    []u16,
-}
-GPU_Primitive :: struct {
-	pos_buf:      ^sdl.GPUBuffer,
-	uv_buf:       ^sdl.GPUBuffer,
-	normal_buf:   ^sdl.GPUBuffer,
-	tangents_buf: ^sdl.GPUBuffer,
-	idx_buf:      ^sdl.GPUBuffer,
-	num_idxs:     u32,
-}
-GPU_Mesh :: struct {
-	primitives: []GPU_Primitive,
+	light_color: [4]f32, // ??? TODO
+	mesh:        Maybe(u32),
+	children:    []u32,
 }
 Mat_Idx :: enum {
 	ALBEDO,
@@ -314,237 +314,6 @@ load_all_models :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
 		load_gltf(r, file_info.name) or_return
 	}
 	os.read_directory_iterator_destroy(&it)
-	return
-}
-
-
-upload_primitive_to_gpu :: proc(
-	r: ^Renderer,
-	mesh: Primitive,
-) -> (
-	gpu_mesh: GPU_Primitive,
-	err: runtime.Allocator_Error,
-) {
-	idxs_size := len(mesh.idxs) * size_of(u16)
-	num_verts := len(mesh.pos)
-	vert_vec3_size := num_verts * size_of([3]f32)
-	vert_vec2_size := num_verts * size_of([2]f32)
-	vert_vec3_size_u32 := u32(vert_vec3_size)
-	vert_vec2_size_u32 := u32(vert_vec2_size)
-	idx_byte_size_u32 := u32(idxs_size)
-
-	gpu_mesh.num_idxs = u32(len(mesh.idxs))
-	gpu_mesh.idx_buf = sdl.CreateGPUBuffer(
-		r._gpu,
-		{usage = {.INDEX}, size = idx_byte_size_u32},
-	);sdle.err(gpu_mesh.idx_buf)
-	gpu_mesh.pos_buf = sdl.CreateGPUBuffer(
-		r._gpu,
-		{usage = {.VERTEX}, size = vert_vec3_size_u32},
-	);sdle.err(gpu_mesh.pos_buf)
-	gpu_mesh.uv_buf = sdl.CreateGPUBuffer(
-		r._gpu,
-		{usage = {.VERTEX}, size = vert_vec2_size_u32},
-	);sdle.err(gpu_mesh.uv_buf)
-	gpu_mesh.normal_buf = sdl.CreateGPUBuffer(
-		r._gpu,
-		{usage = {.VERTEX}, size = vert_vec3_size_u32},
-	);sdle.err(gpu_mesh.normal_buf)
-	gpu_mesh.tangents_buf = sdl.CreateGPUBuffer(
-		r._gpu,
-		{usage = {.VERTEX}, size = vert_vec3_size_u32},
-	);sdle.err(gpu_mesh.tangents_buf)
-
-	transfer_buffer_size := vert_vec3_size_u32 * 3 + vert_vec2_size_u32 + idx_byte_size_u32
-
-	transfer_buf := sdl.CreateGPUTransferBuffer(
-		r._gpu,
-		{usage = .UPLOAD, size = transfer_buffer_size},
-	);sdle.err(transfer_buf)
-	defer sdl.ReleaseGPUTransferBuffer(r._gpu, transfer_buf)
-
-	transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
-		r._gpu,
-		transfer_buf,
-		false,
-	);sdle.err(transfer_mem)
-
-	mem.copy(transfer_mem, raw_data(mesh.idxs), idxs_size)
-	mem.copy(transfer_mem[idxs_size:], raw_data(mesh.pos), vert_vec3_size)
-	uv_offset := idxs_size + vert_vec3_size
-	mem.copy(transfer_mem[uv_offset:], raw_data(mesh.uv), vert_vec2_size)
-	normal_offset := uv_offset + vert_vec2_size
-	mem.copy(transfer_mem[normal_offset:], raw_data(mesh.normal), vert_vec3_size)
-	tangent_offset := normal_offset + vert_vec3_size
-	mem.copy(transfer_mem[tangent_offset:], raw_data(mesh.tangent), vert_vec3_size)
-
-	sdl.UnmapGPUTransferBuffer(r._gpu, transfer_buf)
-	sdl.UploadToGPUBuffer(
-		r._copy_pass,
-		{transfer_buffer = transfer_buf},
-		{buffer = gpu_mesh.idx_buf, size = idx_byte_size_u32},
-		false,
-	)
-	sdl.UploadToGPUBuffer(
-		r._copy_pass,
-		{transfer_buffer = transfer_buf, offset = idx_byte_size_u32},
-		{buffer = gpu_mesh.pos_buf, size = vert_vec3_size_u32},
-		false,
-	)
-	sdl.UploadToGPUBuffer(
-		r._copy_pass,
-		{transfer_buffer = transfer_buf, offset = u32(uv_offset)},
-		{buffer = gpu_mesh.uv_buf, size = vert_vec2_size_u32},
-		false,
-	)
-	sdl.UploadToGPUBuffer(
-		r._copy_pass,
-		{transfer_buffer = transfer_buf, offset = u32(normal_offset)},
-		{buffer = gpu_mesh.normal_buf, size = vert_vec3_size_u32},
-		false,
-	)
-	sdl.UploadToGPUBuffer(
-		r._copy_pass,
-		{transfer_buffer = transfer_buf, offset = u32(tangent_offset)},
-		{buffer = gpu_mesh.tangents_buf, size = vert_vec3_size_u32},
-		false,
-	)
-	return
-}
-
-load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Error) {
-	GLTF_Ctx :: struct {
-		file_name:     string,
-		mesh_name:     string,
-		mesh_idx:      int,
-		primitive_idx: int,
-	}
-	mesh_err_fmt :: "err loading model=%s, mesh_name=%s mesh_idx=%d primitive=%d missing %s attr"
-	get_primitive_attr :: proc(
-		gltf_ctx: GLTF_Ctx,
-		primitive: gltf.Mesh_Primitive,
-		attr: string,
-	) -> (
-		accessor: gltf.Integer,
-	) {
-		ok: bool
-		accessor, ok = primitive.attributes[attr]
-		if !ok do log.panicf(mesh_err_fmt, gltf_ctx.file_name, gltf_ctx.mesh_name, gltf_ctx.mesh_idx, gltf_ctx.primitive_idx, attr)
-		return
-	}
-	gltf_ctx: GLTF_Ctx
-	gltf_ctx.file_name = file_name
-
-	assert(r._copy_pass != nil)
-	assert(r._copy_cmd_buf != nil)
-	temp_mem := runtime.default_temp_allocator_temp_begin()
-	defer runtime.default_temp_allocator_temp_end(temp_mem)
-	log.infof("loading model: %s", file_name)
-
-	data, load_err := gltf.load_from_file(file_name)
-	if load_err != nil {
-		log.panicf("err loading model %s, reason: %v", file_name, load_err)
-	}
-
-	//lights
-	lights: []json.Object
-	if lights_ext_value, has_lights_ext := data.extensions.(json.Object)["KHR_lights_punctual"];
-	   has_lights_ext {
-		lights_arr := lights_ext_value.(json.Array)
-		lights = make([]json.Object, len(lights_arr), context.temp_allocator)
-		for light, i in lights_arr {
-			lights[i] = light.(json.Object)
-		}
-	}
-
-	// meshes
-	mesh_mapper := make([]glist.Glist_Idx, len(data.meshes), context.temp_allocator)
-	for gltf_mesh, mesh_idx in data.meshes {
-		gltf_ctx.mesh_name = gltf_mesh.name.?
-		gltf_ctx.mesh_idx = mesh_idx
-		gpu_mesh: GPU_Mesh
-		gpu_mesh.primitives = make([]GPU_Primitive, len(gltf_mesh.primitives))
-		for gltf_primitive, primitive_idx in gltf_mesh.primitives {
-			gltf_ctx.primitive_idx = primitive_idx
-			indices_idx, has_idxs := gltf_primitive.indices.?
-			if !has_idxs do log.panicf(mesh_err_fmt, gltf_ctx.file_name, gltf_ctx.mesh_name, gltf_ctx.mesh_idx, gltf_ctx.primitive_idx, "indicies")
-			pos_idx := get_primitive_attr(gltf_ctx, gltf_primitive, "POSITION")
-			normal_idx := get_primitive_attr(gltf_ctx, gltf_primitive, "NORMAL")
-			uv_idx := get_primitive_attr(gltf_ctx, gltf_primitive, "TEXCOORD_0")
-
-			pos_buf := gltf.buffer_slice(data, pos_idx).([][3]f32)
-			norm_buf := gltf.buffer_slice(data, normal_idx).([][3]f32)
-			uv_buf := gltf.buffer_slice(data, uv_idx).([][2]f32)
-
-			num_verts := len(pos_buf)
-			primitive: Primitive
-
-			primitive.idxs = gltf.buffer_slice(data, indices_idx).([]u16)
-			// calc tangent
-			for i := 0; i < len(primitive.idxs); i += 3 {
-				v0 := primitive.idxs[i]
-				v1 := primitive.idxs[i + 1]
-				v2 := primitive.idxs[i + 2]
-
-				edge1 := primitive.pos[v1] - primitive.pos[v0]
-				edge2 := primitive.pos[v2] - primitive.pos[v0]
-
-				delta_1 := primitive.uv[v1] - primitive.uv[v0]
-				delta_2 := primitive.uv[v2] - primitive.uv[v0]
-
-				f := 1.0 / (delta_1.x * delta_2.y - delta_2.x * delta_1.y)
-				tangent := f * (delta_2.y * edge1 - delta_1.y * edge2)
-				// bitangent := f * (-delta_2.x * edge1 + delta_1.x * edge2)
-
-				primitive.tangent[v0] += tangent
-				primitive.tangent[v1] += tangent
-				primitive.tangent[v2] += tangent
-			}
-			for i := 0; i < num_verts; i += 1 {
-				primitive.tangent[i] = lal.normalize(primitive.tangent[i])
-			}
-			gpu_primitive := upload_primitive_to_gpu(r, primitive) or_return
-			gpu_mesh.primitives[primitive_idx] = gpu_primitive
-
-		} // end primitive
-		mesh_glist_idx := glist.insert(&r._meshes, gpu_mesh) or_return
-		mesh_mapper[mesh_idx] = mesh_glist_idx
-	} // end mesh
-
-	// nodes 
-	for gltf_node, gltf_node_idx in data.nodes {
-		node: Node
-		// node lights
-		lights_ext, ok := gltf_node.extensions.(json.Object)["KHR_lights_punctual"]
-		if ok {
-			light_idx := lights_ext.(json.Object)["light"].(json.Integer)
-			light := lights[light_idx]
-			light_type := light["type"].(json.String)
-			color: [4]f32 = 1.0
-			maybe_color, has_color := light["color"]
-			if has_color {
-				light_color := maybe_color.(json.Array)
-				for channel, i in light_color {
-					color[i] = f32(channel.(json.Float))
-				}
-			}
-			intensity := f32(light["intensity"].(json.Float))
-			color *= intensity
-			switch light_type {
-			case "point":
-				node.light_color = color
-				node.lit = true
-			}
-		}
-		// node meshes
-		mesh_idx, has_mesh := gltf_node.mesh.?
-		if has_mesh {
-			node.mesh = mesh_mapper[mesh_idx]
-		}
-		//TODO child nodes
-	} // end nodes
-
-
 	return
 }
 
