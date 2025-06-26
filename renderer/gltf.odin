@@ -7,6 +7,7 @@ import "base:runtime"
 import "core:encoding/json"
 import "core:log"
 import "core:mem"
+import "core:slice"
 import sdl "vendor:sdl3"
 
 
@@ -63,7 +64,9 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 
 	// buffers
 	transfer_buffer_size := u32(0)
-	for buffer in data.buffers {
+	buffer_sizer := make([]u32, len(data.buffers))
+	for buffer, i in data.buffers {
+		buffer_sizer[i] = transfer_buffer_size
 		transfer_buffer_size += buffer.byte_length
 	}
 	transfer_buf := sdl.CreateGPUTransferBuffer(
@@ -78,14 +81,12 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		false,
 	);sdle.err(transfer_mem)
 	offset := 0
-	for buffer in data.buffers {
+	for buffer, i in data.buffers {
 		switch buf_ptr in buffer.uri {
 		case string:
 			panic("external buffers not supported")
 		case []byte:
-			int_byte_len := int(buffer.byte_length)
-			mem.copy(transfer_mem[offset:], raw_data(buf_ptr), int_byte_len)
-			offset += int_byte_len
+			mem.copy(transfer_mem[buffer_sizer[i]:], raw_data(buf_ptr), int(buffer.byte_length))
 		}
 	}
 	sdl.UnmapGPUTransferBuffer(r._gpu, transfer_buf)
@@ -108,9 +109,10 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 			r._gpu,
 			{usage = usage, size = buffer_view.byte_length},
 		);sdle.err(gpu_buf)
+		offset := buffer_sizer[buffer_view.buffer] + buffer_view.byte_offset
 		sdl.UploadToGPUBuffer(
-			r._copy_pass, // figure out buffer shenanegains TODO get buffer offset into transfer_mem
-			{transfer_buffer = transfer_buf, offset = buffer_view.byte_offset},
+			r._copy_pass,
+			{transfer_buffer = transfer_buf, offset = offset},
 			{buffer = gpu_buf, size = buffer_view.byte_length},
 			false,
 		)
@@ -136,13 +138,32 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 	}
 
 	//lights
-	lights: []json.Object
 	if lights_ext_value, has_lights_ext := data.extensions.(json.Object)["KHR_lights_punctual"];
 	   has_lights_ext {
 		lights_arr := lights_ext_value.(json.Array)
-		lights = make([]json.Object, len(lights_arr), context.temp_allocator)
-		for light, i in lights_arr {
-			lights[i] = light.(json.Object)
+		model.lights = make([]Model_Light, len(lights_arr), context.temp_allocator)
+		for json_obj_light, i in lights_arr {
+			json_light := json_obj_light.(json.Object)
+			light_type := json_light["type"].(json.String)
+			if light_type != "point" {
+				log.infof(
+					"light at index %d of type %s not supported, only point lights for now.",
+					i,
+					light_type,
+				)
+				continue
+			}
+			color: [4]f32 = 1.0
+			maybe_color, has_color := json_light["color"]
+			if has_color {
+				light_color := maybe_color.(json.Array)
+				for channel, i in light_color {
+					color[i] = f32(channel.(json.Float))
+				}
+			}
+			intensity := f32(json_light["intensity"].(json.Float))
+			color *= intensity
+			model.lights[i].color = color
 		}
 	}
 
@@ -151,10 +172,10 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		gltf_ctx.mesh_name = gltf_mesh.name.?
 		gltf_ctx.mesh_idx = mesh_idx
 		gpu_mesh: Model_Mesh
-		gpu_mesh.primitives = make([]GPU_Primitive, len(gltf_mesh.primitives))
+		gpu_mesh.primitives = make([]Model_Primitive, len(gltf_mesh.primitives))
 		for gltf_primitive, primitive_idx in gltf_mesh.primitives {
 			gltf_ctx.primitive_idx = primitive_idx
-			gpu_primitive: GPU_Primitive
+			gpu_primitive: Model_Primitive
 			ok: bool
 			gpu_primitive.indices, ok = gltf_primitive.indices.?
 			if !ok do panic_primitive_err(gltf_ctx, "indices")
@@ -171,53 +192,25 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 	model_idx := glist.insert(&r._models, model) or_return
 
 	// nodes 
-	node_mapper := make([]pool.Pool_Key, len(data.nodes), context.temp_allocator)
+	num_lights := u32(0)
+	for gltf_node in data.nodes {
+		_, ok := gltf_node.extensions.(json.Object)["KHR_lights_punctual"]
+		num_lights += u32(ok)
+	}
 	for gltf_node, i in data.nodes {
-		node: Node
+		node: Model_Node
 		// node lights
 		lights_ext, ok := gltf_node.extensions.(json.Object)["KHR_lights_punctual"]
 		if ok {
-			light_idx := lights_ext.(json.Object)["light"].(json.Integer)
-			light := lights[light_idx]
-			light_type := light["type"].(json.String)
-			color: [4]f32 = 1.0
-			maybe_color, has_color := light["color"]
-			if has_color {
-				light_color := maybe_color.(json.Array)
-				for channel, i in light_color {
-					color[i] = f32(channel.(json.Float))
-				}
-			}
-			intensity := f32(light["intensity"].(json.Float))
-			color *= intensity
-			switch light_type {
-			case "point":
-				node.light_color = color
-				node.lit = true
-			}
+			node.light = u32(lights_ext.(json.Object)["light"].(json.Integer))
 		}
 		// node meshes
-		mesh_idx, has_mesh := gltf_node.mesh.?
-		if has_mesh {
-			node.mesh = Mesh_Renderer {
-				model = model_idx,
-				mesh  = mesh_idx,
-			}
-		}
+		node.mesh = gltf_node.mesh
 		node.pos = gltf_node.translation
 		node.scale = gltf_node.scale
 		node.rot = gltf_node.rotation
-		node.children = make([]pool.Pool_Key, len(gltf_node.children))
-		node_mapper[i] = pool.insert_defered(&r._nodes, node) or_return
+		node.children = slice.clone(gltf_node.children)
 	} // end nodes
-
-	for key, i in node_mapper {
-		gltf_node := data.nodes[i]
-		node := pool.get(&r._nodes, key)
-	}
-	//TODO child nodes
-
-
 	return
 }
 

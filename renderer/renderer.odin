@@ -43,7 +43,7 @@ Renderer :: struct {
 	_proj_mat:                  matrix[4, 4]f32,
 	_depth_tex:                 ^sdl.GPUTexture,
 	_models:                    glist.Glist(Model),
-	_nodes:                     pool.Pool(Node),
+	_nodes:                     pool.Pool(Node), // TODO
 	_node_map:                  map[string]pool.Pool_Key,
 	//                           material   mesh    node
 	_render_map:                [dynamic][dynamic][dynamic]pool.Pool_Key,
@@ -59,7 +59,6 @@ Renderer :: struct {
 
 	// lights storage buf
 	_lights_buffer:             [MAX_RENDER_LIGHTS]GPU_Point_Light,
-	_lights:                    pool.Pool(GPU_Point_Light),
 	_lights_gpu_buffer:         ^sdl.GPUBuffer,
 	_lights_transfer_buffer:    ^sdl.GPUTransferBuffer,
 
@@ -90,6 +89,7 @@ Model :: struct {
 	accessors: []Model_Accessor,
 	meshes:    []Model_Mesh,
 	nodes:     []Model_Node,
+	lights:    []Model_Light,
 }
 
 Model_Accessor :: struct {
@@ -110,12 +110,15 @@ Model_Primitive :: struct {
 	material: u32,
 }
 Model_Node :: struct {
-	pos:         [3]f32,
-	scale:       [3]f32,
-	rot:         quaternion128,
-	light_color: [4]f32, // ??? TODO
-	mesh:        Maybe(u32),
-	children:    []u32,
+	pos:      [3]f32,
+	scale:    [3]f32,
+	rot:      quaternion128,
+	mesh:     Maybe(u32),
+	light:    Maybe(u32),
+	children: []u32,
+}
+Model_Light :: struct {
+	color: [4]f32,
 }
 Mat_Idx :: enum {
 	ALBEDO,
@@ -229,7 +232,7 @@ init :: proc(
 
 	init_render_pipeline(r)
 
-	r._nodes = pool.make(Node, MAX_NODE_COUNT) or_return
+	r._nodes = pool.make(Node, MAX_NODE_COUNT) or_return //TODO
 
 	win_size: [2]i32
 	ok = sdl.GetWindowSize(window, &win_size.x, &win_size.y);sdle.err(ok)
@@ -265,7 +268,6 @@ init :: proc(
 	);sdle.err(r._transform_transfer_buffer)
 
 	lights_size := u32(size_of(r._lights_buffer))
-	r._lights = pool.make(GPU_Point_Light, MAX_LIGHT_COUNT) or_return
 	r._lights_gpu_buffer = sdl.CreateGPUBuffer(
 		r._gpu,
 		{usage = {.GRAPHICS_STORAGE_READ}, size = lights_size},
@@ -439,16 +441,6 @@ make_node :: proc(
 	return
 }
 
-make_light :: proc(
-	r: ^Renderer,
-	light: GPU_Point_Light,
-) -> (
-	key: pool.Pool_Key,
-	err: runtime.Allocator_Error,
-) {
-	key, err = pool.insert_defered(&r._lights, light)
-	return
-}
 
 get_node :: #force_inline proc(r: ^Renderer, k: pool.Pool_Key) -> (node: ^Node, ok: bool) {
 	return pool.get(&r._nodes, k)
@@ -466,14 +458,14 @@ flush_node_inserts :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
 		n_key := pool.idx_to_key(&r._nodes, n_idx)
 		n, ok := pool.get(&r._nodes, n_key)
 		if !ok do continue
-		// log.infof("flushing insert with key: %v", n_key)
-		// if n._material >= u32(len(r._render_map)) {
-		// 	resize(&r._render_map, n._material + 1) or_return
-		// }
-		// if n._mesh >= u32(len(r._render_map[n._material])) {
-		// 	resize(&r._render_map[n._material], n._mesh + 1) or_return
-		// }
-		// append(&r._render_map[n._material][n._mesh], n_key) or_return
+		log.infof("flushing insert with key: %v", n_key)
+		if n._material >= u32(len(r._render_map)) {
+			resize(&r._render_map, n._material + 1) or_return
+		}
+		if n._mesh >= u32(len(r._render_map[n._material])) {
+			resize(&r._render_map[n._material], n._mesh + 1) or_return
+		}
+		append(&r._render_map[n._material][n._mesh], n_key) or_return
 	}
 	return
 }
@@ -483,50 +475,41 @@ local_transform :: #force_inline proc(n: Node) -> lal.Matrix4f32 {
 	return lal.matrix4_from_trs_f32(n.pos, n.rot, n.scale)
 }
 
+
 @(private)
-add_light :: #force_inline proc(r: ^Renderer, node: ^Node) {
-	if r._lights_rendered == MAX_RENDER_LIGHTS || !node.lit do return
-	light: GPU_Point_Light
-	light.pos.xyz = node._global_mat[3].xyz
-	r._lights_buffer[r._lights_rendered] = light
-	r._lights_rendered += 1
+compute_node_transforms_and_lights :: proc(r: ^Renderer) {
+	temp_mem := runtime.default_temp_allocator_temp_begin()
+	defer runtime.default_temp_allocator_temp_end(temp_mem)
+	stack := make([dynamic]^Node, 0, pool.num_active(r._nodes), allocator = context.temp_allocator)
+	idx: pool.Pool_Idx
+	for node, i in pool.next(&r._nodes, &idx) {
+		if node._visited do continue
+		node._visited = true
+
+		cur := node
+		parent_transform := lal.MATRIX4F32_IDENTITY
+		for parent in next_node_parent(r, &cur) {
+			if parent._visited {
+				parent_transform = parent._global_transform
+				break
+			}
+			parent._visited = true
+			append(&stack, parent)
+		}
+		#reverse for s_node in stack {
+			s_node._global_transform = local_transform(s_node^) * parent_transform
+			parent_transform = s_node._global_transform
+		}
+		clear(&stack)
+		node._global_transform = local_transform(node^) * parent_transform
+	}
+	idx = 0
+	for node in pool.next(&r._nodes, &idx) {
+		node._visited = false
+		add_light(r, node)
+	}
 	return
 }
-
-// @(private)
-// compute_node_transforms_and_lights :: proc(r: ^Renderer) {
-// 	temp_mem := runtime.default_temp_allocator_temp_begin()
-// 	defer runtime.default_temp_allocator_temp_end(temp_mem)
-// 	stack := make([dynamic]^Node, 0, pool.num_active(r._nodes), allocator = context.temp_allocator)
-// 	idx: pool.Pool_Idx
-// 	for node, i in pool.next(&r._nodes, &idx) {
-// 		if node._visited do continue
-// 		node._visited = true
-
-// 		cur := node
-// 		parent_transform := lal.MATRIX4F32_IDENTITY
-// 		for parent in next_node_parent(r, &cur) {
-// 			if parent._visited {
-// 				parent_transform = parent._global_transform
-// 				break
-// 			}
-// 			parent._visited = true
-// 			append(&stack, parent)
-// 		}
-// 		#reverse for s_node in stack {
-// 			s_node._global_transform = local_transform(s_node^) * parent_transform
-// 			parent_transform = s_node._global_transform
-// 		}
-// 		clear(&stack)
-// 		node._global_transform = local_transform(node^) * parent_transform
-// 	}
-// 	idx = 0
-// 	for node in pool.next(&r._nodes, &idx) {
-// 		node._visited = false
-// 		add_light(r, node)
-// 	}
-// 	return
-// }
 
 flush_nodes :: proc(r: ^Renderer) {
 	// log.infof("flushing %d frees", r.nodes._free_buf_len)
@@ -535,10 +518,6 @@ flush_nodes :: proc(r: ^Renderer) {
 	flush_node_inserts(r)
 }
 
-flush_lights :: proc(r: ^Renderer) {
-	pool.flush_frees(&r._lights)
-	pool.flush_inserts(&r._lights)
-}
 
 @(private)
 draw :: proc(r: ^Renderer) {
@@ -654,7 +633,7 @@ draw :: proc(r: ^Renderer) {
 }
 
 render :: proc(r: ^Renderer) {
-	// compute_node_transforms_and_lights(r)
+	compute_node_transforms_and_lights(r)
 	// log.debug("compute good!")
 	draw(r)
 	// log.debug("draw good!")
