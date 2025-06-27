@@ -45,7 +45,7 @@ Renderer :: struct {
 	_models:                    glist.Glist(Model),
 	_nodes:                     pool.Pool(Node), // TODO
 	_node_map:                  map[string]pool.Pool_Key,
-	//                           material   mesh    node
+	//                           model   primitive   node
 	_render_map:                [dynamic][dynamic][dynamic]pool.Pool_Key,
 
 	// copy
@@ -90,6 +90,15 @@ Model :: struct {
 	meshes:    []Model_Mesh,
 	nodes:     []Model_Node,
 	lights:    []Model_Light,
+	materials: []Model_Material,
+}
+
+Model_Material :: struct {
+	diffuse_buf:     u32,
+	metal_rough_buf: u32,
+	normal_buf:      u32,
+	occlusion_buf:   u32,
+	emmisive_buf:    Maybe(u32),
 }
 
 Model_Accessor :: struct {
@@ -104,6 +113,7 @@ Model_Mesh :: struct {
 Model_Primitive :: struct {
 	pos:      u32,
 	uv:       u32,
+	uv1:      u32,
 	normal:   u32,
 	tangent:  u32,
 	indices:  u32,
@@ -146,28 +156,26 @@ GPU_DEPTH_TEX_FMT :: sdl.GPUTextureFormat.D24_UNORM
 
 @(private)
 init_render_pipeline :: proc(r: ^Renderer) {
-	vert_shader := load_shader(
-		r._gpu,
-		"default.spv.vert",
-		{uniform_buffers = 1, storage_buffers = 1},
-	)
+	vert_shader := load_shader(r._gpu, "pbr.spv.vert", {uniform_buffers = 1, storage_buffers = 1})
 	frag_shader := load_shader(
 		r._gpu,
-		"default.spv.frag",
-		{uniform_buffers = 1, storage_buffers = 1, samplers = 4},
+		"pbr.spv.frag",
+		{uniform_buffers = 1, storage_buffers = 1, samplers = 5},
 	)
 
 	vertex_attrs := []sdl.GPUVertexAttribute {
 		{location = 0, buffer_slot = 0, format = .FLOAT3},
 		{location = 1, buffer_slot = 1, format = .FLOAT2},
-		{location = 2, buffer_slot = 2, format = .FLOAT3},
+		{location = 2, buffer_slot = 2, format = .FLOAT2},
 		{location = 3, buffer_slot = 3, format = .FLOAT3},
+		{location = 4, buffer_slot = 4, format = .FLOAT3},
 	}
 	vertex_buffer_descriptions := []sdl.GPUVertexBufferDescription {
 		{slot = 0, pitch = size_of([3]f32)},
 		{slot = 1, pitch = size_of([2]f32)},
-		{slot = 2, pitch = size_of([3]f32)},
+		{slot = 2, pitch = size_of([2]f32)},
 		{slot = 3, pitch = size_of([3]f32)},
+		{slot = 4, pitch = size_of([3]f32)},
 	}
 	r._pipeline = sdl.CreateGPUGraphicsPipeline(
 		r._gpu,

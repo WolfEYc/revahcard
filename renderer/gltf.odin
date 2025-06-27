@@ -61,6 +61,7 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 	model.accessors = make([]Model_Accessor, len(data.accessors))
 	model.meshes = make([]Model_Mesh, len(data.meshes))
 	model.nodes = make([]Model_Node, len(data.nodes))
+	model.materials = make([]Model_Material, len(data.materials))
 
 	// buffers
 	transfer_buffer_size := u32(0)
@@ -167,30 +168,55 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		}
 	}
 
+	// materials
+	for gltf_material, i in data.materials {
+		model_material: Model_Material
+		diffuse_metal_rough, has_base_metal := gltf_material.metallic_roughness.?;assert(has_base_metal)
+		diffuse_tex, has_diffuse := diffuse_metal_rough.base_color_texture.?;assert(has_diffuse)
+		metal_rough_tex, has_metal_rough := diffuse_metal_rough.metallic_roughness_texture.?;assert(has_metal_rough)
+		ok: bool
+		model_material.diffuse_buf, ok = data.images[diffuse_tex.index].buffer_view.?
+		assert(ok)
+		model_material.metal_rough_buf, ok = data.images[metal_rough_tex.index].buffer_view.?
+		assert(ok)
+		normal, has_normal := gltf_material.normal_texture.?;assert(has_normal)
+		model_material.normal_buf, ok = data.images[normal.index].buffer_view.?
+		assert(ok)
+		occlusion, has_occlusion := gltf_material.occlusion_texture.?;assert(has_occlusion)
+		model_material.occlusion_buf, ok = data.images[occlusion.index].buffer_view.?
+		assert(ok)
+		emissive, has_emissive := gltf_material.emissive_texture.?
+		if has_emissive {
+			model_material.emmisive_buf, ok = data.images[emissive.index].buffer_view.?
+			assert(ok)
+		}
+		model.materials[i] = model_material
+	}
+
 	// meshes
 	for gltf_mesh, mesh_idx in data.meshes {
 		gltf_ctx.mesh_name = gltf_mesh.name.?
 		gltf_ctx.mesh_idx = mesh_idx
-		gpu_mesh: Model_Mesh
-		gpu_mesh.primitives = make([]Model_Primitive, len(gltf_mesh.primitives))
+		model_mesh: Model_Mesh
+		model_mesh.primitives = make([]Model_Primitive, len(gltf_mesh.primitives))
 		for gltf_primitive, primitive_idx in gltf_mesh.primitives {
 			gltf_ctx.primitive_idx = primitive_idx
-			gpu_primitive: Model_Primitive
+			model_primitive: Model_Primitive
 			ok: bool
-			gpu_primitive.indices, ok = gltf_primitive.indices.?
+			model_primitive.indices, ok = gltf_primitive.indices.?
 			if !ok do panic_primitive_err(gltf_ctx, "indices")
-			gpu_primitive.pos = get_primitive_attr(gltf_ctx, gltf_primitive, "POSITION")
-			gpu_primitive.uv = get_primitive_attr(gltf_ctx, gltf_primitive, "TEXCOORD_0")
-			gpu_primitive.normal = get_primitive_attr(gltf_ctx, gltf_primitive, "NORMAL")
-			gpu_primitive.tangent = get_primitive_attr(gltf_ctx, gltf_primitive, "TANGENT")
+			if gltf_primitive.mode != .Triangles do panic_primitive_err(gltf_ctx, "Triangles mode")
+			model_primitive.pos = get_primitive_attr(gltf_ctx, gltf_primitive, "POSITION")
+			model_primitive.uv = get_primitive_attr(gltf_ctx, gltf_primitive, "TEXCOORD_0")
+			model_primitive.normal = get_primitive_attr(gltf_ctx, gltf_primitive, "NORMAL")
+			model_primitive.tangent = get_primitive_attr(gltf_ctx, gltf_primitive, "TANGENT")
+			model_primitive.material, ok = gltf_primitive.material.?
+			if !ok do panic_primitive_err(gltf_ctx, "material")
 
-			gpu_mesh.primitives[primitive_idx] = gpu_primitive
+			model_mesh.primitives[primitive_idx] = model_primitive
 		}
-		model.meshes[mesh_idx] = gpu_mesh
+		model.meshes[mesh_idx] = model_mesh
 	}
-
-	model_idx := glist.insert(&r._models, model) or_return
-
 	// nodes 
 	num_lights := u32(0)
 	for gltf_node in data.nodes {
@@ -210,7 +236,9 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		node.scale = gltf_node.scale
 		node.rot = gltf_node.rotation
 		node.children = slice.clone(gltf_node.children)
+		model.nodes[i] = node
 	} // end nodes
+	model_idx := glist.insert(&r._models, model) or_return
 	return
 }
 

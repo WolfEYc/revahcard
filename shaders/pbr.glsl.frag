@@ -4,15 +4,16 @@ const PI = radians(180.0);
 
 layout(set=2, binding=0) uniform sampler2D albedo_sampler;
 layout(set=2, binding=1) uniform sampler2D normal_sampler;
-layout(set=2, binding=2) uniform sampler2D orm_sampler;
-layout(set=2, binding=3) uniform sampler2D emissive_sampler;
+layout(set=2, binding=2) uniform sampler2D metallic_roughness_sampler;
+layout(set=2, binding=3) uniform sampler2D occlusion_sampler;
+layout(set=2, binding=4) uniform sampler2D emissive_sampler;
 
 struct Light {
     vec4 pos;
     vec4 color;
 };
 
-layout(set=2, binding=4) readonly buffer Lights {
+layout(set=2, binding=5) readonly buffer Lights {
     Light lights[64];
 };
 
@@ -24,8 +25,9 @@ layout(set=3, binding=0) uniform Frag_UBO {
 
 layout(location=0) in vec3 in_world_pos;
 layout(location=1) in vec2 in_uv;
-layout(location=2) in vec3 in_normal;
-layout(location=3) in vec3 in_tangent;
+layout(location=2) in vec2 in_uv1;
+layout(location=3) in vec3 in_normal;
+layout(location=4) in vec3 in_tangent;
 
 layout(location=0) out vec4 out_color;
 
@@ -74,13 +76,14 @@ float geometry_smith(float normal_dot_view, float normal_dot_light, float roughn
 
 void main() {
     vec3 albedo = texture(albedo_sampler, in_uv);
+    vec3 emissive = texture(emissive_sampler, in_uv).rgb;
     vec3 normal = calc_normal();
-    vec3 orm = texture(orm_sampler, in_uv).rgb;
-    vec3 dir_to_cam = normalize(cam_world_pos - in_world_pos
-    );
-    float occlusion = orm.r;
-    float roughness = orm.g;
-    float metallic = orm.b;
+    vec2 metal_rough = texture(orm_sampler, in_uv).gb;
+    float occlusion = texture(occlusion_sampler, in_uv1).r;
+    float roughness = metal_rough.g;
+    float metallic = metal_rough.b;
+
+    vec3 dir_to_cam = normalize(cam_world_pos - in_world_pos);
 
     vec3 color = vec3(0.0);
     for (uint i = 0; i < rendered_lights; i++) {
@@ -113,6 +116,7 @@ void main() {
 
     vec3 ambient = ambient_light_color * albedo * occlusion;
     color += ambient;
+    color += emissive;
 
     // HDR Reinhard tonemapping
     color = color / (color + vec3(1.0));    
