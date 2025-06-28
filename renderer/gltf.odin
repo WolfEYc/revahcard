@@ -23,16 +23,17 @@ Model :: struct {
 	meshes:    []Model_Mesh,
 	nodes:     []Model_Node,
 	lights:    []Model_Light,
-	samplers:  []sdl.GPUTextureSamplerBinding,
-	materials: []Model_Material,
+	samplers:  []^sdl.GPUSampler,
+	textures:  []sdl.GPUTextureSamplerBinding, //TODO maybe temp?
+	materials: []Model_Material, //TODO
 }
 
 Model_Material :: struct {
-	diffuse_buf:     u32,
-	metal_rough_buf: u32,
-	normal_buf:      u32,
-	occlusion_buf:   u32,
-	emmisive_buf:    Maybe(u32),
+	diffuse_tex:     u32,
+	metal_rough_tex: u32,
+	normal_tex:      u32,
+	occlusion_tex:   u32,
+	emmisive_tex:    Maybe(u32),
 }
 
 Model_Accessor :: struct {
@@ -103,20 +104,6 @@ panic_primitive_err :: proc(gltf_ctx: GLTF_Ctx, missing: string) {
 		missing,
 	)
 }
-@(private)
-load_surface :: proc(r: ^Renderer, io_stream: ^sdl.IOStream) -> (surf: ^sdl.Surface) {
-	disk_surface := sdli.Load_IO(io_stream, true);sdle.err(disk_surface)
-	palette := sdl.GetSurfacePalette(disk_surface)
-	surf = sdl.ConvertSurfaceAndColorspace(
-		disk_surface,
-		.RGBA32,
-		palette,
-		.SRGB_LINEAR,
-		0,
-	);sdle.err(surf)
-	sdl.DestroySurface(disk_surface)
-	return
-}
 load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Error) {
 	gltf_ctx: GLTF_Ctx
 	gltf_ctx.file_name = file_name
@@ -141,40 +128,130 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 
 
 	// images
-	surfaces := make([]^sdl.Surface, len(data.images), context.temp_allocator)
-	surfaces_num_bytes := i32(0)
+	surfaces := make([]^sdl.Surface, len(data.buffer_views), context.temp_allocator)
 	for gltf_image, i in data.images {
 		img_type, has_img_type := gltf_image.type.?
 		assert(has_img_type)
 		buf_view_idx, has_buf_view := gltf_image.buffer_view.?
 		assert(has_buf_view)
+		bview_is_image[buf_view_idx] = true
 		buf_view := data.buffer_views[buf_view_idx]
-		io_stream: ^sdl.IOStream
+		mem_buf_view: rawptr
 		switch mem in data.buffers[buf_view.buffer].uri {
 		case string:
 			panic("external buffers not supported")
 		case []byte:
-			mem_buf_view := mem[buf_view.byte_offset:]
-			io_stream = sdl.IOFromMem(raw_data(mem_buf_view), uint(buf_view.byte_length))
+			mem_buf_view = raw_data(mem[buf_view.byte_offset:])
 		}
-		surf := load_surface(r, io_stream)
-		surfaces[i] = surf
+		io_stream := sdl.IOFromMem(mem_buf_view, uint(buf_view.byte_length))
+		disk_surface := sdli.Load_IO(io_stream, true);sdle.err(disk_surface)
+		palette := sdl.GetSurfacePalette(disk_surface)
+		surf := sdl.ConvertSurfaceAndColorspace(
+			disk_surface,
+			.RGBA32,
+			palette,
+			.SRGB_LINEAR,
+			0,
+		);sdle.err(surf)
+		sdl.DestroySurface(disk_surface)
+		surfaces[buf_view_idx] = surf
 		surfaces_num_bytes += surf.h * surf.pitch
 	}
-
-	// TODO transfer buffer the surfaces
-
-	// textures
-	for gltf_tex, i in data.textures {
-		img_idx, has_img := gltf_tex.source.?;assert(has_img)
-		sampler_idx, has_sampler := gltf_tex.sampler.?
-		sampler_info: sdl.GPUSamplerCreateInfo
-		defer {
-			gpu_sampler := sdl.CreateGPUSampler(r._gpu, sampler_info);sdle.err(gpu_sampler)
-			model.samplers[i].sampler = gpu_sampler
+	// setup transfer buf
+	transfer_buffer_size := u32(0)
+	buffer_sizer := make([]u32, len(data.buffer_views))
+	for bview, i in data.buffer_views {
+		if surfaces[i] != nil {
+			surf := surfaces[i]
+			buffer_sizer[i] = transfer_buffer_size
+			transfer_buffer_size += u32(surf.h * surf.pitch)
+		} else {
+			buffer_sizer[i] = transfer_buffer_size
+			transfer_buffer_size += bview.byte_length
 		}
-		if !has_sampler do continue
-		gltf_sampler := data.samplers[sampler_idx]
+	}
+	transfer_buf := sdl.CreateGPUTransferBuffer(
+		r._gpu,
+		{usage = .UPLOAD, size = transfer_buffer_size},
+	);sdle.err(transfer_buf)
+
+	transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
+		r._gpu,
+		transfer_buf,
+		false,
+	);sdle.err(transfer_mem)
+
+	// buffer views
+	for bview, i in data.buffer_views {
+		if surfaces[i] != nil {
+			surface := surfaces[i]
+			offset := buffer_sizer[i]
+			width := u32(surface.w)
+			height := u32(surface.h)
+			len_pixels := int(surface.h * surface.pitch)
+			len_pixels_u32 := u32(len_pixels)
+			mem.copy(transfer_mem[offset:], surf.pixels, len_pixels)
+			sdl.DestroySurface(surf)
+			tex := sdl.CreateGPUTexture(
+				r._gpu,
+				{
+					type = .D2,
+					format = .R8G8B8A8_UNORM,
+					usage = {.SAMPLER},
+					width = width,
+					height = height,
+					layer_count_or_depth = 1,
+					num_levels = 1,
+				},
+			);sdle.err(tex)
+			sdl.UploadToGPUTexture(
+				r._copy_pass,
+				{transfer_buffer = transfer_buf},
+				{texture = tex, w = width, h = height, d = 1},
+				false,
+			)
+			model.buffers[i] = tex
+			return
+		}
+		buffer := data.buffers[bview.buffer]
+		switch buf_bytes in buffer.uri {
+		case string:
+			panic("external buffers not supported")
+		case []byte:
+			bview_bytes := raw_data(buf_bytes[:bview.byte_offset])
+			mem.copy(transfer_mem[buffer_sizer[i]:], bview_bytes, int(bview.byte_length))
+		}
+		target, ok := bview.target.?
+		if !ok {
+			name := bview.name.?
+			log.panicf("model %s had buffer view %d:%s with unknown target", file_name, i, name)
+		}
+		usage: sdl.GPUBufferUsageFlags
+		switch target {
+		case .Array:
+			usage = {.VERTEX}
+		case .Element_Array:
+			usage = {.INDEX}
+		}
+		gpu_buf := sdl.CreateGPUBuffer(
+			r._gpu,
+			{usage = usage, size = bview.byte_length},
+		);sdle.err(gpu_buf)
+		sdl.UploadToGPUBuffer(
+			r._copy_pass,
+			{transfer_buffer = transfer_buf, offset = buffer_sizer[i]},
+			{buffer = gpu_buf, size = bview.byte_length},
+			false,
+		)
+		model.buffers[i] = gpu_buf
+	}
+	sdl.UnmapGPUTransferBuffer(r._gpu, transfer_buf)
+	sdl.ReleaseGPUTransferBuffer(r._gpu, transfer_buf)
+
+
+	// samplers
+	for gltf_sampler, i in data.samplers {
+		sampler_info: sdl.GPUSamplerCreateInfo
 		min_filter, has_min_filter := gltf_sampler.min_filter.?
 		if has_min_filter {
 			switch min_filter {
@@ -207,63 +284,18 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		}
 		sampler_info.address_mode_u = sdl.GPUSamplerAddressMode(gltf_sampler.wrapS)
 		sampler_info.address_mode_v = sdl.GPUSamplerAddressMode(gltf_sampler.wrapT)
+		gpu_sampler := sdl.CreateGPUSampler(r._gpu, sampler_info);sdle.err(gpu_sampler)
+		model.samplers[i] = gpu_sampler
 	}
 
-	// buffers
-	transfer_buffer_size := u32(0)
-	buffer_sizer := make([]u32, len(data.buffers))
-	for buffer, i in data.buffers {
-		buffer_sizer[i] = transfer_buffer_size
-		transfer_buffer_size += buffer.byte_length
-	}
-	transfer_buf := sdl.CreateGPUTransferBuffer(
-		r._gpu,
-		{usage = .UPLOAD, size = transfer_buffer_size},
-	);sdle.err(transfer_buf)
-	defer sdl.ReleaseGPUTransferBuffer(r._gpu, transfer_buf)
+	// textures
+	for gltf_tex, i in data.textures {
+		img_idx, has_img := gltf_tex.source.?;assert(has_img)
+		buf_view_idx, has_buf_view := data.images[img_idx].buffer_view.?;assert(has_buf_view)
 
-	transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
-		r._gpu,
-		transfer_buf,
-		false,
-	);sdle.err(transfer_mem)
-	offset := 0
-	for buffer, i in data.buffers {
-		switch buf_ptr in buffer.uri {
-		case string:
-			panic("external buffers not supported")
-		case []byte:
-			mem.copy(transfer_mem[buffer_sizer[i]:], raw_data(buf_ptr), int(buffer.byte_length))
-		}
-	}
-	sdl.UnmapGPUTransferBuffer(r._gpu, transfer_buf)
-
-	// buffer views
-	for buffer_view, i in data.buffer_views {
-		target, ok := buffer_view.target.?
-		if !ok {
-			name := buffer_view.name.?
-			log.panicf("model %s had buffer view %d:%s with unknown target", file_name, i, name)
-		}
-		usage: sdl.GPUBufferUsageFlags
-		switch target {
-		case .Array:
-			usage = {.VERTEX}
-		case .Element_Array:
-			usage = {.INDEX}
-		}
-		gpu_buf := sdl.CreateGPUBuffer(
-			r._gpu,
-			{usage = usage, size = buffer_view.byte_length},
-		);sdle.err(gpu_buf)
-		offset := buffer_sizer[buffer_view.buffer] + buffer_view.byte_offset
-		sdl.UploadToGPUBuffer(
-			r._copy_pass,
-			{transfer_buffer = transfer_buf, offset = offset},
-			{buffer = gpu_buf, size = buffer_view.byte_length},
-			false,
-		)
-		model.buffers[i] = gpu_buf
+		model.textures[i].texture = model.buffers[buf_view_idx].(^sdl.GPUTexture)
+		sampler_idx, has_sampler := gltf_tex.sampler.?
+		model.textures[i].sampler = has_sampler ? model.samplers[sampler_idx] : r._defaut_sampler
 	}
 
 	// accessors
@@ -321,19 +353,19 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		diffuse_tex, has_diffuse := diffuse_metal_rough.base_color_texture.?;assert(has_diffuse)
 		metal_rough_tex, has_metal_rough := diffuse_metal_rough.metallic_roughness_texture.?;assert(has_metal_rough)
 		ok: bool
-		model_material.diffuse_buf, ok = data.images[diffuse_tex.index].buffer_view.?
+		model_material.diffuse_tex, ok = data.images[diffuse_tex.index].buffer_view.?
 		assert(ok)
-		model_material.metal_rough_buf, ok = data.images[metal_rough_tex.index].buffer_view.?
+		model_material.metal_rough_tex, ok = data.images[metal_rough_tex.index].buffer_view.?
 		assert(ok)
 		normal, has_normal := gltf_material.normal_texture.?;assert(has_normal)
-		model_material.normal_buf, ok = data.images[normal.index].buffer_view.?
+		model_material.normal_tex, ok = data.images[normal.index].buffer_view.?
 		assert(ok)
 		occlusion, has_occlusion := gltf_material.occlusion_texture.?;assert(has_occlusion)
-		model_material.occlusion_buf, ok = data.images[occlusion.index].buffer_view.?
+		model_material.occlusion_tex = model.textures[occlusion.index]
 		assert(ok)
 		emissive, has_emissive := gltf_material.emissive_texture.?
 		if has_emissive {
-			model_material.emmisive_buf, ok = data.images[emissive.index].buffer_view.?
+			model_material.emmisive_tex, ok = data.images[emissive.index].buffer_view.?
 			assert(ok)
 		}
 		model.materials[i] = model_material
@@ -365,11 +397,6 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		model.meshes[mesh_idx] = model_mesh
 	}
 	// nodes 
-	num_lights := u32(0)
-	for gltf_node in data.nodes {
-		_, ok := gltf_node.extensions.(json.Object)["KHR_lights_punctual"]
-		num_lights += u32(ok)
-	}
 	for gltf_node, i in data.nodes {
 		node: Model_Node
 		// node lights

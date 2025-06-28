@@ -42,6 +42,7 @@ Renderer :: struct {
 	_pipeline:                  ^sdl.GPUGraphicsPipeline,
 	_proj_mat:                  matrix[4, 4]f32,
 	_depth_tex:                 ^sdl.GPUTexture,
+	_defaut_sampler:            ^sdl.GPUSampler,
 	_models:                    glist.Glist(Model),
 	_nodes:                     pool.Pool(Node), // TODO
 	_node_map:                  map[string]pool.Pool_Key,
@@ -208,6 +209,7 @@ init :: proc(
 			num_levels = 1,
 		},
 	);sdle.err(r._depth_tex)
+	r._defaut_sampler = sdl.CreateGPUSampler(r._gpu, {})
 
 	transform_buf_size := u32(size_of(Transform_Storage_Buffer))
 	r._transform_gpu_buffer = sdl.CreateGPUBuffer(
