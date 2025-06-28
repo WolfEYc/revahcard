@@ -2,7 +2,7 @@
 
 const PI = radians(180.0);
 
-layout(set=2, binding=0) uniform sampler2D albedo_sampler;
+layout(set=2, binding=0) uniform sampler2D diffuse_sampler;
 layout(set=2, binding=1) uniform sampler2D normal_sampler;
 layout(set=2, binding=2) uniform sampler2D metallic_roughness_sampler;
 layout(set=2, binding=3) uniform sampler2D occlusion_sampler;
@@ -75,7 +75,7 @@ float geometry_smith(float normal_dot_view, float normal_dot_light, float roughn
 }
 
 void main() {
-    vec3 albedo = texture(albedo_sampler, in_uv);
+    vec3 diffuse = texture(diffuse_sampler, in_uv);
     vec3 emissive = texture(emissive_sampler, in_uv).rgb;
     vec3 normal = calc_normal();
     vec2 metal_rough = texture(orm_sampler, in_uv).gb;
@@ -97,7 +97,7 @@ void main() {
         vec3 halfway = normalize(dir_to_light + dir_to_cam);
 
         // Cook-Torrance BRDF
-        vec3 F0 = mix(vec3(0.04), albedo, metallic); // surface reflection at 0 incidence
+        vec3 F0 = mix(vec3(0.04), diffuse, metallic); // surface reflection at 0 incidence
         float cos_theta = max(dot(halfway, dir_to_cam), 0.0);
         vec3 F = frensel_schlick(cos_theta, F0);
         float NDF = distribution_ggx(normal, halfway, roughness);
@@ -111,10 +111,10 @@ void main() {
 
         vec3 kD = vec3(1.0) - F;
         kD *= 1.0 - metallic;
-        color += (kD * albedo / PI + specular) * radiance * normal_dot_light;
+        color += (kD * diffuse / PI + specular) * radiance * normal_dot_light;
     }
 
-    vec3 ambient = ambient_light_color * albedo * occlusion;
+    vec3 ambient = ambient_light_color * diffuse * occlusion;
     color += ambient;
     color += emissive;
 

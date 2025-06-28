@@ -9,6 +9,68 @@ import "core:log"
 import "core:mem"
 import "core:slice"
 import sdl "vendor:sdl3"
+import sdli "vendor:sdl3/image"
+
+
+Model_Buffer :: union {
+	^sdl.GPUBuffer,
+	^sdl.GPUTexture,
+}
+
+Model :: struct {
+	buffers:   []Model_Buffer,
+	accessors: []Model_Accessor,
+	meshes:    []Model_Mesh,
+	nodes:     []Model_Node,
+	lights:    []Model_Light,
+	samplers:  []sdl.GPUTextureSamplerBinding,
+	materials: []Model_Material,
+}
+
+Model_Material :: struct {
+	diffuse_buf:     u32,
+	metal_rough_buf: u32,
+	normal_buf:      u32,
+	occlusion_buf:   u32,
+	emmisive_buf:    Maybe(u32),
+}
+
+Model_Accessor :: struct {
+	buffer: u32,
+	offset: u32,
+}
+
+Model_Mesh :: struct {
+	primitives: []Model_Primitive,
+}
+// indexes to accessors
+Model_Primitive :: struct {
+	pos:      u32,
+	uv:       u32,
+	uv1:      u32,
+	normal:   u32,
+	tangent:  u32,
+	indices:  u32,
+	material: u32,
+}
+Model_Node :: struct {
+	pos:      [3]f32,
+	scale:    [3]f32,
+	rot:      quaternion128,
+	mesh:     Maybe(u32),
+	light:    Maybe(u32),
+	children: []u32,
+}
+Model_Light :: struct {
+	color: [4]f32,
+}
+Mat_Idx :: enum {
+	DIFFUSE,
+	NORMAL,
+	METAL_ROUGH,
+	OCCLUSION,
+	EMISSIVE,
+}
 
 
 GLTF_Ctx :: struct {
@@ -41,6 +103,20 @@ panic_primitive_err :: proc(gltf_ctx: GLTF_Ctx, missing: string) {
 		missing,
 	)
 }
+@(private)
+load_surface :: proc(r: ^Renderer, io_stream: ^sdl.IOStream) -> (surf: ^sdl.Surface) {
+	disk_surface := sdli.Load_IO(io_stream, true);sdle.err(disk_surface)
+	palette := sdl.GetSurfacePalette(disk_surface)
+	surf = sdl.ConvertSurfaceAndColorspace(
+		disk_surface,
+		.RGBA32,
+		palette,
+		.SRGB_LINEAR,
+		0,
+	);sdle.err(surf)
+	sdl.DestroySurface(disk_surface)
+	return
+}
 load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Error) {
 	gltf_ctx: GLTF_Ctx
 	gltf_ctx.file_name = file_name
@@ -57,11 +133,81 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 	}
 	defer gltf.unload(data)
 	model: Model
-	model.buffers = make([]^sdl.GPUBuffer, len(data.buffer_views))
+	model.buffers = make([]Model_Buffer, len(data.buffer_views))
 	model.accessors = make([]Model_Accessor, len(data.accessors))
 	model.meshes = make([]Model_Mesh, len(data.meshes))
 	model.nodes = make([]Model_Node, len(data.nodes))
 	model.materials = make([]Model_Material, len(data.materials))
+
+
+	// images
+	surfaces := make([]^sdl.Surface, len(data.images), context.temp_allocator)
+	surfaces_num_bytes := i32(0)
+	for gltf_image, i in data.images {
+		img_type, has_img_type := gltf_image.type.?
+		assert(has_img_type)
+		buf_view_idx, has_buf_view := gltf_image.buffer_view.?
+		assert(has_buf_view)
+		buf_view := data.buffer_views[buf_view_idx]
+		io_stream: ^sdl.IOStream
+		switch mem in data.buffers[buf_view.buffer].uri {
+		case string:
+			panic("external buffers not supported")
+		case []byte:
+			mem_buf_view := mem[buf_view.byte_offset:]
+			io_stream = sdl.IOFromMem(raw_data(mem_buf_view), uint(buf_view.byte_length))
+		}
+		surf := load_surface(r, io_stream)
+		surfaces[i] = surf
+		surfaces_num_bytes += surf.h * surf.pitch
+	}
+
+	// TODO transfer buffer the surfaces
+
+	// textures
+	for gltf_tex, i in data.textures {
+		img_idx, has_img := gltf_tex.source.?;assert(has_img)
+		sampler_idx, has_sampler := gltf_tex.sampler.?
+		sampler_info: sdl.GPUSamplerCreateInfo
+		defer {
+			gpu_sampler := sdl.CreateGPUSampler(r._gpu, sampler_info);sdle.err(gpu_sampler)
+			model.samplers[i].sampler = gpu_sampler
+		}
+		if !has_sampler do continue
+		gltf_sampler := data.samplers[sampler_idx]
+		min_filter, has_min_filter := gltf_sampler.min_filter.?
+		if has_min_filter {
+			switch min_filter {
+			case .Linear:
+				sampler_info.min_filter = .LINEAR
+			case .Nearest:
+				sampler_info.min_filter = .NEAREST
+			case .Nearest_MipMap_Nearest:
+				sampler_info.min_filter = .NEAREST
+				sampler_info.mipmap_mode = .NEAREST
+			case .Linear_MipMap_Nearest:
+				sampler_info.min_filter = .LINEAR
+				sampler_info.mipmap_mode = .NEAREST
+			case .Nearest_MipMap_Linear:
+				sampler_info.min_filter = .NEAREST
+				sampler_info.mipmap_mode = .LINEAR
+			case .Linear_MipMap_Linear:
+				sampler_info.min_filter = .LINEAR
+				sampler_info.mipmap_mode = .LINEAR
+			}
+		}
+		mag_filter, has_max_filter := gltf_sampler.mag_filter.?
+		if has_max_filter {
+			switch mag_filter {
+			case .Linear:
+				sampler_info.mag_filter = .LINEAR
+			case .Nearest:
+				sampler_info.mag_filter = .NEAREST
+			}
+		}
+		sampler_info.address_mode_u = sdl.GPUSamplerAddressMode(gltf_sampler.wrapS)
+		sampler_info.address_mode_v = sdl.GPUSamplerAddressMode(gltf_sampler.wrapT)
+	}
 
 	// buffers
 	transfer_buffer_size := u32(0)
@@ -208,6 +354,7 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 			if gltf_primitive.mode != .Triangles do panic_primitive_err(gltf_ctx, "Triangles mode")
 			model_primitive.pos = get_primitive_attr(gltf_ctx, gltf_primitive, "POSITION")
 			model_primitive.uv = get_primitive_attr(gltf_ctx, gltf_primitive, "TEXCOORD_0")
+			model_primitive.uv1 = get_primitive_attr(gltf_ctx, gltf_primitive, "TEXCOORD_1")
 			model_primitive.normal = get_primitive_attr(gltf_ctx, gltf_primitive, "NORMAL")
 			model_primitive.tangent = get_primitive_attr(gltf_ctx, gltf_primitive, "TANGENT")
 			model_primitive.material, ok = gltf_primitive.material.?

@@ -83,62 +83,6 @@ GPU_Point_Light :: struct #align (32) {
 	// intensity: f32, // 4
 }
 
-
-Model :: struct {
-	buffers:   []^sdl.GPUBuffer,
-	accessors: []Model_Accessor,
-	meshes:    []Model_Mesh,
-	nodes:     []Model_Node,
-	lights:    []Model_Light,
-	materials: []Model_Material,
-}
-
-Model_Material :: struct {
-	diffuse_buf:     u32,
-	metal_rough_buf: u32,
-	normal_buf:      u32,
-	occlusion_buf:   u32,
-	emmisive_buf:    Maybe(u32),
-}
-
-Model_Accessor :: struct {
-	buffer: u32,
-	offset: u32,
-}
-
-Model_Mesh :: struct {
-	primitives: []Model_Primitive,
-}
-// indexes to accessors
-Model_Primitive :: struct {
-	pos:      u32,
-	uv:       u32,
-	uv1:      u32,
-	normal:   u32,
-	tangent:  u32,
-	indices:  u32,
-	material: u32,
-}
-Model_Node :: struct {
-	pos:      [3]f32,
-	scale:    [3]f32,
-	rot:      quaternion128,
-	mesh:     Maybe(u32),
-	light:    Maybe(u32),
-	children: []u32,
-}
-Model_Light :: struct {
-	color: [4]f32,
-}
-Mat_Idx :: enum {
-	ALBEDO,
-	NORMAL,
-	ORM,
-	EMISSIVE,
-}
-GPU_Material :: struct {
-	bindings: [4]sdl.GPUTextureSamplerBinding,
-}
 Vert_UBO :: struct {
 	vp: matrix[4, 4]f32,
 }
