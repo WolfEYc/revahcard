@@ -130,7 +130,7 @@ main :: proc() {
 		// render
 		renderer.flush_nodes(r)
 		renderer.flush_lights(r)
-		renderer.render(r)
+		renderer.render_frame(r)
 	}
 }
 

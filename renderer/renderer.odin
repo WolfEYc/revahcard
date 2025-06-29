@@ -25,29 +25,24 @@ texture_dir :: "textures"
 model_dir :: "models"
 model_dist_dir :: dist_dir + os.Path_Separator_String + model_dir
 
-
-MAX_NODE_COUNT :: 65536
+MAX_MODELS :: 4096
 MAX_RENDER_NODES :: 4096
-MAX_LIGHT_COUNT :: 1024
 MAX_RENDER_LIGHTS :: 64
-MAX_MESH_COUNT :: 1024
-MAX_MATERIAL_COUNT :: 1024
 
 Renderer :: struct {
 	cam:                        Camera,
 	ambient_light_color:        [3]f32,
-	//private
+	model_map:                  map[string]glist.Glist_Idx,
+	// render nececities
 	_gpu:                       ^sdl.GPUDevice,
 	_window:                    ^sdl.Window,
 	_pipeline:                  ^sdl.GPUGraphicsPipeline,
 	_proj_mat:                  matrix[4, 4]f32,
 	_depth_tex:                 ^sdl.GPUTexture,
 	_defaut_sampler:            ^sdl.GPUSampler,
+
+	// catalog
 	_models:                    glist.Glist(Model),
-	_nodes:                     pool.Pool(Node), // TODO
-	_node_map:                  map[string]pool.Pool_Key,
-	//                           model   primitive   node
-	_render_map:                [dynamic][dynamic][dynamic]pool.Pool_Key,
 
 	// copy
 	_copy_cmd_buf:              ^sdl.GPUCommandBuffer,
@@ -55,6 +50,7 @@ Renderer :: struct {
 
 	// transform storage buf
 	_transform_buffer:          Transform_Storage_Buffer,
+	_transform_buffer_cheata:   [MAX_RENDER_NODES]matrix[4, 4]f32,
 	_transform_gpu_buffer:      ^sdl.GPUBuffer,
 	_transform_transfer_buffer: ^sdl.GPUTransferBuffer,
 
@@ -63,11 +59,12 @@ Renderer :: struct {
 	_lights_gpu_buffer:         ^sdl.GPUBuffer,
 	_lights_transfer_buffer:    ^sdl.GPUTransferBuffer,
 
-	// per frame
+	// per frame                model     mesh      transform
+	_draw_state:                [dynamic][dynamic][dynamic]u32, // _transform_buffer index
 	_draw_cmd_buf:              ^sdl.GPUCommandBuffer,
 	_draw_render_pass:          ^sdl.GPURenderPass,
 	_lights_rendered:           u32,
-	_nodes_rendered:            u32,
+	_transforms_rendered:       u32,
 	_vert_ubo:                  Vert_UBO,
 	_frag_ubo:                  Frag_UBO,
 }
@@ -79,9 +76,7 @@ Camera :: struct {
 
 GPU_Point_Light :: struct #align (32) {
 	pos:   [4]f32, // 16
-	// _pad:  f32, // 4
 	color: [4]f32, // 16
-	// intensity: f32, // 4
 }
 
 Vert_UBO :: struct {
@@ -180,12 +175,8 @@ init :: proc(
 	ok := sdl.ClaimWindowForGPUDevice(gpu, window);sdle.err(ok)
 	r._gpu = gpu
 	r._window = window
-
 	ok = sdl.SetGPUSwapchainParameters(gpu, window, .SDR_LINEAR, .VSYNC);sdle.err(ok)
-
 	init_render_pipeline(r)
-
-	r._nodes = pool.make(Node, MAX_NODE_COUNT) or_return //TODO
 
 	win_size: [2]i32
 	ok = sdl.GetWindowSize(window, &win_size.x, &win_size.y);sdle.err(ok)
@@ -231,7 +222,7 @@ init :: proc(
 		{usage = .UPLOAD, size = lights_size},
 	);sdle.err(r._lights_transfer_buffer)
 
-
+	r._models = glist.make(Model, MAX_MODELS) or_return
 	r.cam.target = r.cam.pos
 	r.cam.target.z -= 1
 	return
@@ -273,208 +264,83 @@ load_all_models :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
 	return
 }
 
-
-@(private)
-load_texture :: proc(r: ^Renderer, file_name: string) -> (tex: sdl.GPUTextureSamplerBinding) {
-	ok: bool
-	// tex, ok = r._texture_catalog[file_name]
-	if ok do return
-	log.infof("loading texture: %s", file_name)
-	temp_mem := runtime.default_temp_allocator_temp_begin()
-	defer runtime.default_temp_allocator_temp_end(temp_mem)
-
-	file_path := filepath.join(
-		{dist_dir, texture_dir, file_name},
-		allocator = context.temp_allocator,
-	)
-	file_path_cstring := strings.clone_to_cstring(file_path, allocator = context.temp_allocator)
-	disk_surface := sdli.Load(file_path_cstring);sdle.err(disk_surface)
-	palette := sdl.GetSurfacePalette(disk_surface)
-	surface := sdl.ConvertSurfaceAndColorspace(
-		disk_surface,
-		.RGBA32,
-		palette,
-		.SRGB_LINEAR,
-		0,
-	);sdle.err(surface)
-	sdl.DestroySurface(disk_surface)
-	defer sdl.DestroySurface(surface)
-
-	width := u32(surface.w)
-	height := u32(surface.h)
-	len_pixels := int(surface.h * surface.pitch)
-	len_pixels_u32 := u32(len_pixels)
-	// log.debugf("width=%d", width)
-	// log.debugf("height=%d", height)
-
-	tex.texture = sdl.CreateGPUTexture(
-		r._gpu,
-		{
-			type = .D2,
-			format = .R8G8B8A8_UNORM,
-			usage = {.SAMPLER},
-			width = width,
-			height = height,
-			layer_count_or_depth = 1,
-			num_levels = 1,
-		},
-	);sdle.err(tex.texture)
-	tex_transfer_buf := sdl.CreateGPUTransferBuffer(
-		r._gpu,
-		{usage = .UPLOAD, size = len_pixels_u32},
-	);sdle.err(tex_transfer_buf)
-	defer sdl.ReleaseGPUTransferBuffer(r._gpu, tex_transfer_buf)
-
-	tex_transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
-		r._gpu,
-		tex_transfer_buf,
-		false,
-	);sdle.err(tex_transfer_mem)
-
-	// log.debugf("mempcpy %d bytes to texture transfer buf", len_pixels)
-	mem.copy(tex_transfer_mem, surface.pixels, len_pixels)
-
-	sdl.UnmapGPUTransferBuffer(r._gpu, tex_transfer_buf)
-	sdl.UploadToGPUTexture(
-		r._copy_pass,
-		{transfer_buffer = tex_transfer_buf},
-		{texture = tex.texture, w = width, h = height, d = 1},
-		false,
-	)
-	tex.sampler = sdl.CreateGPUSampler(r._gpu, {});sdle.err(tex.sampler)
-	// r._texture_catalog[file_name] = tex
-	return
-}
-
-Material_Meta :: struct {
-	diffuse:     string `json:"diffuse"`,
-	metal_rough: string `json:"metal_rough"`,
-	specular:    string `json:"specular"`,
-	emissive:    string `json:"emissive"`,
-}
-
-
-Make_Node_Error :: union #shared_nil {
-	runtime.Allocator_Error,
-	Catalog_Error,
-}
-Catalog_Error :: enum {
-	None = 0,
-	Mesh_Not_Found,
-	Material_Not_Found,
-}
-
-Make_Node_Params :: struct {
-	mesh_name:     string,
-	material_name: string,
-	parent:        pool.Pool_Key,
-	transform:     matrix[4, 4]f32,
-}
-
-
-make_node :: proc(
-	r: ^Renderer,
-	model_name: string,
-	pos := [3]f32{0, 0, 0},
-	rot := lal.QUATERNIONF32_IDENTITY,
-	scale := [3]f32{1, 1, 1},
-	visible := true,
-	lit := true,
-) -> (
-	key: pool.Pool_Key,
-	err: Make_Node_Error,
-) {
-	ok: bool
-	node: Node
-	node.pos = pos
-	node.rot = rot
-	node.scale = scale
-	node.visible = visible
-	node.lit = lit
-	key = pool.insert_defered(&r._nodes, node) or_return
-	return
-}
-
-
-get_node :: #force_inline proc(r: ^Renderer, k: pool.Pool_Key) -> (node: ^Node, ok: bool) {
-	return pool.get(&r._nodes, k)
-}
-
-free_node :: #force_inline proc(r: ^Renderer, k: pool.Pool_Key) {
-	pool.free_defered(&r._nodes, k)
-}
-
-@(private)
-flush_node_inserts :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
-	pending_inserts := pool.pending_inserts(&r._nodes)
-	pool.flush_inserts(&r._nodes)
-	for n_idx in pending_inserts {
-		n_key := pool.idx_to_key(&r._nodes, n_idx)
-		n, ok := pool.get(&r._nodes, n_key)
-		if !ok do continue
-		log.infof("flushing insert with key: %v", n_key)
-		if n._material >= u32(len(r._render_map)) {
-			resize(&r._render_map, n._material + 1) or_return
-		}
-		if n._mesh >= u32(len(r._render_map[n._material])) {
-			resize(&r._render_map[n._material], n._mesh + 1) or_return
-		}
-		append(&r._render_map[n._material][n._mesh], n_key) or_return
-	}
-	return
-}
-
-
-local_transform :: #force_inline proc(n: Node) -> lal.Matrix4f32 {
+local_transform :: #force_inline proc(n: Model_Node) -> lal.Matrix4f32 {
 	return lal.matrix4_from_trs_f32(n.pos, n.rot, n.scale)
 }
 
+Draw_Req :: struct {
+	model_idx: glist.Glist_Idx,
+	node_idx:  u32,
+	transform: matrix[4, 4]f32,
+}
+// call me a bunch!
+draw_node :: proc(r: ^Renderer, req: Draw_Req) {
+	Draw_Model_Node_Req :: struct {
+		model:     ^Model,
+		meshes:    ^[dynamic][dynamic]u32,
+		node_idx:  u32,
+		transform: matrix[4, 4]f32,
+	}
+	sub_req: Draw_Model_Node_Req
+	sub_req.model = glist.get(&r._models, req.model_idx)
+	req_len_model := req.model_idx + 1
+	if req_len_model > u32(len(r._draw_state)) do resize(&r._draw_state, req_len_model)
+	sub_req.meshes = &r._draw_state[req.model_idx]
+	req_len_mesh := len(sub_req.model.meshes)
+	if req_len_mesh > len(sub_req.meshes) do resize(sub_req.meshes, req_len_mesh)
+	sub_req.transform = req.transform
 
-@(private)
-compute_node_transforms_and_lights :: proc(r: ^Renderer) {
-	temp_mem := runtime.default_temp_allocator_temp_begin()
-	defer runtime.default_temp_allocator_temp_end(temp_mem)
-	stack := make([dynamic]^Node, 0, pool.num_active(r._nodes), allocator = context.temp_allocator)
-	idx: pool.Pool_Idx
-	for node, i in pool.next(&r._nodes, &idx) {
-		if node._visited do continue
-		node._visited = true
-
-		cur := node
-		parent_transform := lal.MATRIX4F32_IDENTITY
-		for parent in next_node_parent(r, &cur) {
-			if parent._visited {
-				parent_transform = parent._global_transform
-				break
+	draw_model_node :: proc(r: ^Renderer, req: Draw_Model_Node_Req) {
+		node := req.model.nodes[req.node_idx]
+		sub_req := req
+		sub_req.transform = local_transform(node) * req.transform
+		mesh_idx, has_mesh := node.mesh.?
+		if has_mesh {
+			mesh := req.model.meshes[mesh_idx]
+			transform_idxs := &req.meshes[mesh_idx]
+			r._transform_buffer_cheata[r._transforms_rendered] = sub_req.transform
+			append(transform_idxs, r._transforms_rendered)
+			r._transforms_rendered += 1
+		}
+		light, has_light := node.light.?
+		if has_light {
+			pos4: [4]f32
+			pos4.xyz = node.pos
+			pos4.a = 1
+			light := req.model.lights[light]
+			r._lights_buffer[r._lights_rendered] = GPU_Point_Light {
+				pos   = pos4 * req.transform,
+				color = light.color,
 			}
-			parent._visited = true
-			append(&stack, parent)
+			r._lights_rendered += 1
 		}
-		#reverse for s_node in stack {
-			s_node._global_transform = local_transform(s_node^) * parent_transform
-			parent_transform = s_node._global_transform
+		for child in node.children {
+			sub_req.node_idx = child
+			draw_model_node(r, sub_req)
 		}
-		clear(&stack)
-		node._global_transform = local_transform(node^) * parent_transform
 	}
-	idx = 0
-	for node in pool.next(&r._nodes, &idx) {
-		node._visited = false
-		add_light(r, node)
+	draw_model_node(r, sub_req)
+}
+// call me afterwards to render the frame
+render_frame :: proc(r: ^Renderer) {
+	begin_frame(r)
+	draw_calls(r)
+	// log.debug("draw good!")
+	storage_buffer_uploads: {
+		start_copy_pass(r)
+		upload_transform_buffer(r)
+		// log.debug("transform good!")
+		upload_lights_buffer(r)
+		// log.debug("lights good!")
+		end_copy_pass(r)
 	}
-	return
+	end_frame(r)
 }
-
-flush_nodes :: proc(r: ^Renderer) {
-	// log.infof("flushing %d frees", r.nodes._free_buf_len)
-	pool.flush_frees(&r._nodes)
-	// log.infof("flushing %d inserts", r.nodes._insert_buf_len)
-	flush_node_inserts(r)
-}
-
 
 @(private)
-draw :: proc(r: ^Renderer) {
+begin_frame :: proc(r: ^Renderer) {
+	assert(r._draw_render_pass == nil)
+	assert(r._draw_cmd_buf == nil)
 	r._draw_cmd_buf = sdl.AcquireGPUCommandBuffer(r._gpu);sdle.err(r._draw_cmd_buf)
 
 	swapchain_tex: ^sdl.GPUTexture
@@ -524,93 +390,74 @@ draw :: proc(r: ^Renderer) {
 	}
 	// log.debugf("gonna render %d lights", rendered_lights)
 	sdl.PushGPUFragmentUniformData(r._draw_cmd_buf, 0, &r._frag_ubo, size_of(Frag_UBO))
+}
+
+
+@(private)
+draw_calls :: proc(r: ^Renderer) {
 
 	// log.debug("draw init good!")
-	r._nodes_rendered = 0
-	for material_meshes, material_idx in r._render_map {
-		material: ^GPU_Material
-		for mesh_nodes, mesh_idx in material_meshes {
+	r._transforms_rendered = 0
+	for meshes, model_idx in r._draw_state {
+		for transform_idxs, mesh_idx in meshes {
 			draw_instances := u32(0)
-			for node_key, node_idx in mesh_nodes {
-				node, ok := pool.get(&r._nodes, node_key)
-				if !ok || !node.visible do continue
-				if r._nodes_rendered == MAX_RENDER_NODES do break
-				r._transform_buffer.ms[r._nodes_rendered] = node._global_mat
+			for transform_idx in transform_idxs {
+				r._transform_buffer.ms[r._transforms_rendered] =
+					r._transform_buffer_cheata[transform_idx]
 				// r._transform_buffer.ns[r._nodes_rendered] = lal.inverse_transpose(
 				// 	node._global_transform,
 				// )
 				draw_instances += 1
-				r._nodes_rendered += 1
+				r._transforms_rendered += 1
 			}
 			if draw_instances == 0 do continue
-
-			if material == nil {
-				material = glist.get(&r._materials, glist.Glist_Idx(material_idx))
+			model := glist.get(&r._models, glist.Glist_Idx(model_idx))
+			mesh := model.meshes[mesh_idx]
+			for primitive_idx in mesh { 	// TODO actually do the draw call correctly
 				sdl.BindGPUFragmentSamplers(
 					r._draw_render_pass,
 					0,
 					raw_data(material.bindings[:]),
 					len(material.bindings),
 				)
+				sdl.BindGPUVertexBuffers(
+					r._draw_render_pass,
+					0,
+					&(sdl.GPUBufferBinding{buffer = mesh.vert_buf}),
+					1,
+				)
+				sdl.BindGPUIndexBuffer(
+					r._draw_render_pass,
+					sdl.GPUBufferBinding{buffer = mesh.idx_buf},
+					._16BIT,
+				)
+				first_draw_index := r._transforms_rendered - draw_instances
+				// log.debugf(
+				// 	"mesh.num_idxs=%d draw_instances=%d, first_draw_index=%d",
+				// 	mesh.num_idxs,
+				// 	draw_instances,
+				// 	first_draw_index,
+				// )
+				sdl.DrawGPUIndexedPrimitives(
+					r._draw_render_pass,
+					mesh.num_idxs,
+					draw_instances,
+					0,
+					0,
+					first_draw_index,
+				)
 			}
-			mesh := glist.get(&r._meshes, glist.Glist_Idx(mesh_idx))
-			sdl.BindGPUVertexBuffers(
-				r._draw_render_pass,
-				0,
-				&(sdl.GPUBufferBinding{buffer = mesh.vert_buf}),
-				1,
-			)
-			sdl.BindGPUIndexBuffer(
-				r._draw_render_pass,
-				sdl.GPUBufferBinding{buffer = mesh.idx_buf},
-				._16BIT,
-			)
-
-			first_draw_index := r._nodes_rendered - draw_instances
-			// log.debugf(
-			// 	"mesh.num_idxs=%d draw_instances=%d, first_draw_index=%d",
-			// 	mesh.num_idxs,
-			// 	draw_instances,
-			// 	first_draw_index,
-			// )
-			sdl.DrawGPUIndexedPrimitives(
-				r._draw_render_pass,
-				mesh.num_idxs,
-				draw_instances,
-				0,
-				0,
-				first_draw_index,
-			)
 		}
 	}
 	return
 }
 
-render :: proc(r: ^Renderer) {
-	compute_node_transforms_and_lights(r)
-	// log.debug("compute good!")
-	draw(r)
-	// log.debug("draw good!")
-	storage_buffer_uploads: {
-		start_copy_pass(r)
-		upload_transform_buffer(r)
-		// log.debug("transform good!")
-		upload_lights_buffer(r)
-		// log.debug("lights good!")
-		end_copy_pass(r)
-	}
-	sdl.EndGPURenderPass(r._draw_render_pass)
-	ok := sdl.SubmitGPUCommandBuffer(r._draw_cmd_buf);sdle.err(ok)
-	r._lights_rendered = 0
-	r._nodes_rendered = 0
-}
-
 @(private)
 upload_transform_buffer :: proc(r: ^Renderer) {
-	if r._nodes_rendered == 0 {
+	if r._transforms_rendered == 0 {
 		return
 	}
-	size := size_of(Transform_Storage_Buffer) * r._nodes_rendered
+	size := size_of(Transform_Storage_Buffer) * r._transforms_rendered
 
 	transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
 		r._gpu,
@@ -651,5 +498,17 @@ upload_lights_buffer :: proc(r: ^Renderer) {
 		{buffer = r._lights_gpu_buffer, size = size},
 		true,
 	)
+}
+
+@(private)
+end_frame :: proc(r: ^Renderer) {
+	assert(r._draw_render_pass != nil)
+	assert(r._draw_cmd_buf != nil)
+	sdl.EndGPURenderPass(r._draw_render_pass)
+	ok := sdl.SubmitGPUCommandBuffer(r._draw_cmd_buf);sdle.err(ok)
+	r._draw_render_pass = nil
+	r._draw_cmd_buf = nil
+	r._lights_rendered = 0
+	r._transforms_rendered = 0
 }
 

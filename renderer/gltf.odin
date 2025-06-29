@@ -24,8 +24,9 @@ Model :: struct {
 	nodes:     []Model_Node,
 	lights:    []Model_Light,
 	samplers:  []^sdl.GPUSampler,
-	textures:  []sdl.GPUTextureSamplerBinding, //TODO maybe temp?
-	materials: []Model_Material, //TODO
+	textures:  []sdl.GPUTextureSamplerBinding,
+	materials: []Model_Material,
+	node_map:  map[string]u32,
 }
 
 Model_Material :: struct {
@@ -105,13 +106,12 @@ panic_primitive_err :: proc(gltf_ctx: GLTF_Ctx, missing: string) {
 	)
 }
 load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Error) {
-	gltf_ctx: GLTF_Ctx
-	gltf_ctx.file_name = file_name
-
 	assert(r._copy_pass != nil)
 	assert(r._copy_cmd_buf != nil)
 	temp_mem := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
+	gltf_ctx: GLTF_Ctx
+	gltf_ctx.file_name = file_name
 	log.infof("loading model: %s", file_name)
 
 	data, load_err := gltf.load_from_file(file_name)
@@ -125,6 +125,7 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 	model.meshes = make([]Model_Mesh, len(data.meshes))
 	model.nodes = make([]Model_Node, len(data.nodes))
 	model.materials = make([]Model_Material, len(data.materials))
+	model.textures = make([]sdl.GPUTextureSamplerBinding, len(data.textures))
 
 
 	// images
@@ -134,7 +135,6 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		assert(has_img_type)
 		buf_view_idx, has_buf_view := gltf_image.buffer_view.?
 		assert(has_buf_view)
-		bview_is_image[buf_view_idx] = true
 		buf_view := data.buffer_views[buf_view_idx]
 		mem_buf_view: rawptr
 		switch mem in data.buffers[buf_view.buffer].uri {
@@ -155,7 +155,6 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		);sdle.err(surf)
 		sdl.DestroySurface(disk_surface)
 		surfaces[buf_view_idx] = surf
-		surfaces_num_bytes += surf.h * surf.pitch
 	}
 	// setup transfer buf
 	transfer_buffer_size := u32(0)
@@ -190,8 +189,8 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 			height := u32(surface.h)
 			len_pixels := int(surface.h * surface.pitch)
 			len_pixels_u32 := u32(len_pixels)
-			mem.copy(transfer_mem[offset:], surf.pixels, len_pixels)
-			sdl.DestroySurface(surf)
+			mem.copy(transfer_mem[offset:], surface.pixels, len_pixels)
+			sdl.DestroySurface(surface)
 			tex := sdl.CreateGPUTexture(
 				r._gpu,
 				{
@@ -355,19 +354,16 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		ok: bool
 		model_material.diffuse_tex, ok = data.images[diffuse_tex.index].buffer_view.?
 		assert(ok)
-		model_material.metal_rough_tex, ok = data.images[metal_rough_tex.index].buffer_view.?
+		model_material.metal_rough_tex = metal_rough_tex.index
 		assert(ok)
 		normal, has_normal := gltf_material.normal_texture.?;assert(has_normal)
-		model_material.normal_tex, ok = data.images[normal.index].buffer_view.?
+		model_material.normal_tex = normal.index
 		assert(ok)
 		occlusion, has_occlusion := gltf_material.occlusion_texture.?;assert(has_occlusion)
-		model_material.occlusion_tex = model.textures[occlusion.index]
+		model_material.occlusion_tex = occlusion.index
 		assert(ok)
 		emissive, has_emissive := gltf_material.emissive_texture.?
-		if has_emissive {
-			model_material.emmisive_tex, ok = data.images[emissive.index].buffer_view.?
-			assert(ok)
-		}
+		model_material.emmisive_tex = has_emissive ? emissive.index : nil
 		model.materials[i] = model_material
 	}
 
@@ -412,7 +408,9 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		node.children = slice.clone(gltf_node.children)
 		model.nodes[i] = node
 	} // end nodes
+
 	model_idx := glist.insert(&r._models, model) or_return
+
 	return
 }
 
