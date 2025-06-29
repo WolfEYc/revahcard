@@ -39,7 +39,10 @@ Renderer :: struct {
 	_pipeline:                  ^sdl.GPUGraphicsPipeline,
 	_proj_mat:                  matrix[4, 4]f32,
 	_depth_tex:                 ^sdl.GPUTexture,
+	// defaults
 	_defaut_sampler:            ^sdl.GPUSampler,
+	_default_texture:           ^sdl.GPUTexture,
+	_default_tex_binding:       sdl.GPUTextureSamplerBinding,
 
 	// catalog
 	_models:                    glist.Glist(Model),
@@ -201,6 +204,7 @@ init :: proc(
 		},
 	);sdle.err(r._depth_tex)
 	r._defaut_sampler = sdl.CreateGPUSampler(r._gpu, {})
+	r._default_texture = sdl.CreateGPUTexture()
 
 	transform_buf_size := u32(size_of(Transform_Storage_Buffer))
 	r._transform_gpu_buffer = sdl.CreateGPUBuffer(
@@ -413,7 +417,9 @@ draw_calls :: proc(r: ^Renderer) {
 			if draw_instances == 0 do continue
 			model := glist.get(&r._models, glist.Glist_Idx(model_idx))
 			mesh := model.meshes[mesh_idx]
-			for primitive_idx in mesh { 	// TODO actually do the draw call correctly
+			for primitive in mesh.primitives { 	// TODO actually do the draw call correctly
+				material := model.materials[primitive.material]
+
 				sdl.BindGPUFragmentSamplers(
 					r._draw_render_pass,
 					0,

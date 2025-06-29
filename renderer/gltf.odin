@@ -24,19 +24,11 @@ Model :: struct {
 	nodes:     []Model_Node,
 	lights:    []Model_Light,
 	samplers:  []^sdl.GPUSampler,
-	textures:  []sdl.GPUTextureSamplerBinding,
 	materials: []Model_Material,
 	node_map:  map[string]u32,
 }
 
-Model_Material :: struct {
-	diffuse_tex:     u32,
-	metal_rough_tex: u32,
-	normal_tex:      u32,
-	occlusion_tex:   u32,
-	emmisive_tex:    Maybe(u32),
-}
-
+Model_Material :: [5]sdl.GPUTextureSamplerBinding
 Model_Accessor :: struct {
 	buffer: u32,
 	offset: u32,
@@ -125,7 +117,6 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 	model.meshes = make([]Model_Mesh, len(data.meshes))
 	model.nodes = make([]Model_Node, len(data.nodes))
 	model.materials = make([]Model_Material, len(data.materials))
-	model.textures = make([]sdl.GPUTextureSamplerBinding, len(data.textures))
 
 
 	// images
@@ -288,13 +279,14 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 	}
 
 	// textures
+	textures := make([]sdl.GPUTextureSamplerBinding, len(data.textures), context.temp_allocator)
 	for gltf_tex, i in data.textures {
 		img_idx, has_img := gltf_tex.source.?;assert(has_img)
 		buf_view_idx, has_buf_view := data.images[img_idx].buffer_view.?;assert(has_buf_view)
 
-		model.textures[i].texture = model.buffers[buf_view_idx].(^sdl.GPUTexture)
+		textures[i].texture = model.buffers[buf_view_idx].(^sdl.GPUTexture)
 		sampler_idx, has_sampler := gltf_tex.sampler.?
-		model.textures[i].sampler = has_sampler ? model.samplers[sampler_idx] : r._defaut_sampler
+		textures[i].sampler = has_sampler ? model.samplers[sampler_idx] : r._defaut_sampler
 	}
 
 	// accessors
@@ -351,19 +343,14 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		diffuse_metal_rough, has_base_metal := gltf_material.metallic_roughness.?;assert(has_base_metal)
 		diffuse_tex, has_diffuse := diffuse_metal_rough.base_color_texture.?;assert(has_diffuse)
 		metal_rough_tex, has_metal_rough := diffuse_metal_rough.metallic_roughness_texture.?;assert(has_metal_rough)
-		ok: bool
-		model_material.diffuse_tex, ok = data.images[diffuse_tex.index].buffer_view.?
-		assert(ok)
-		model_material.metal_rough_tex = metal_rough_tex.index
-		assert(ok)
+		model_material[Mat_Idx.DIFFUSE] = textures[diffuse_tex.index]
+		model_material[Mat_Idx.METAL_ROUGH] = textures[metal_rough_tex.index]
 		normal, has_normal := gltf_material.normal_texture.?;assert(has_normal)
-		model_material.normal_tex = normal.index
-		assert(ok)
+		model_material[Mat_Idx.NORMAL] = textures[normal.index]
 		occlusion, has_occlusion := gltf_material.occlusion_texture.?;assert(has_occlusion)
-		model_material.occlusion_tex = occlusion.index
-		assert(ok)
+		model_material[Mat_Idx.OCCLUSION] = textures[occlusion.index]
 		emissive, has_emissive := gltf_material.emissive_texture.?
-		model_material.emmisive_tex = has_emissive ? emissive.index : nil
+		model_material[Mat_Idx.EMISSIVE] = has_emissive ? emissive.index : nil
 		model.materials[i] = model_material
 	}
 
