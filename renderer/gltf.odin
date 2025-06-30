@@ -7,6 +7,7 @@ import "base:runtime"
 import "core:encoding/json"
 import "core:log"
 import "core:mem"
+import "core:simd"
 import "core:slice"
 import sdl "vendor:sdl3"
 import sdli "vendor:sdl3/image"
@@ -19,16 +20,20 @@ Model_Buffer :: union {
 
 Model :: struct {
 	buffers:   []Model_Buffer,
-	accessors: []Model_Accessor,
 	meshes:    []Model_Mesh,
 	nodes:     []Model_Node,
 	lights:    []Model_Light,
 	samplers:  []^sdl.GPUSampler,
 	materials: []Model_Material,
-	node_map:  map[string]u32,
+	node_map:  map[string]u32, //TODO
 }
 
-Model_Material :: [5]sdl.GPUTextureSamplerBinding
+Model_Material :: struct {
+	name:         Maybe(string),
+	normal_scale: f32,
+	ao_strength:  f32,
+	bindings:     [5]sdl.GPUTextureSamplerBinding,
+}
 Model_Accessor :: struct {
 	buffer: u32,
 	offset: u32,
@@ -37,15 +42,20 @@ Model_Accessor :: struct {
 Model_Mesh :: struct {
 	primitives: []Model_Primitive,
 }
+Vert_Idx :: enum {
+	POS,
+	UV,
+	UV1,
+	NORMAL,
+	TANGENT,
+}
 // indexes to accessors
 Model_Primitive :: struct {
-	pos:      u32,
-	uv:       u32,
-	uv1:      u32,
-	normal:   u32,
-	tangent:  u32,
-	indices:  u32,
-	material: u32,
+	vert_bufs:    [5]sdl.GPUBufferBinding,
+	indices:      sdl.GPUBufferBinding,
+	indices_type: sdl.GPUIndexElementSize,
+	num_indices:  u32,
+	material:     u32,
 }
 Model_Node :: struct {
 	pos:      [3]f32,
@@ -113,7 +123,6 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 	defer gltf.unload(data)
 	model: Model
 	model.buffers = make([]Model_Buffer, len(data.buffer_views))
-	model.accessors = make([]Model_Accessor, len(data.accessors))
 	model.meshes = make([]Model_Mesh, len(data.meshes))
 	model.nodes = make([]Model_Node, len(data.nodes))
 	model.materials = make([]Model_Material, len(data.materials))
@@ -201,39 +210,44 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 				false,
 			)
 			model.buffers[i] = tex
-			return
+		} else {
+			buffer := data.buffers[bview.buffer]
+			switch buf_bytes in buffer.uri {
+			case string:
+				panic("external buffers not supported")
+			case []byte:
+				bview_bytes := raw_data(buf_bytes[:bview.byte_offset])
+				mem.copy(transfer_mem[buffer_sizer[i]:], bview_bytes, int(bview.byte_length))
+			}
+			target, ok := bview.target.?
+			if !ok {
+				name := bview.name.?
+				log.panicf(
+					"model %s had buffer view %d:%s with unknown target",
+					file_name,
+					i,
+					name,
+				)
+			}
+			usage: sdl.GPUBufferUsageFlags
+			switch target {
+			case .Array:
+				usage = {.VERTEX}
+			case .Element_Array:
+				usage = {.INDEX}
+			}
+			gpu_buf := sdl.CreateGPUBuffer(
+				r._gpu,
+				{usage = usage, size = bview.byte_length},
+			);sdle.err(gpu_buf)
+			sdl.UploadToGPUBuffer(
+				r._copy_pass,
+				{transfer_buffer = transfer_buf, offset = buffer_sizer[i]},
+				{buffer = gpu_buf, size = bview.byte_length},
+				false,
+			)
+			model.buffers[i] = gpu_buf
 		}
-		buffer := data.buffers[bview.buffer]
-		switch buf_bytes in buffer.uri {
-		case string:
-			panic("external buffers not supported")
-		case []byte:
-			bview_bytes := raw_data(buf_bytes[:bview.byte_offset])
-			mem.copy(transfer_mem[buffer_sizer[i]:], bview_bytes, int(bview.byte_length))
-		}
-		target, ok := bview.target.?
-		if !ok {
-			name := bview.name.?
-			log.panicf("model %s had buffer view %d:%s with unknown target", file_name, i, name)
-		}
-		usage: sdl.GPUBufferUsageFlags
-		switch target {
-		case .Array:
-			usage = {.VERTEX}
-		case .Element_Array:
-			usage = {.INDEX}
-		}
-		gpu_buf := sdl.CreateGPUBuffer(
-			r._gpu,
-			{usage = usage, size = bview.byte_length},
-		);sdle.err(gpu_buf)
-		sdl.UploadToGPUBuffer(
-			r._copy_pass,
-			{transfer_buffer = transfer_buf, offset = buffer_sizer[i]},
-			{buffer = gpu_buf, size = bview.byte_length},
-			false,
-		)
-		model.buffers[i] = gpu_buf
 	}
 	sdl.UnmapGPUTransferBuffer(r._gpu, transfer_buf)
 	sdl.ReleaseGPUTransferBuffer(r._gpu, transfer_buf)
@@ -289,24 +303,6 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		textures[i].sampler = has_sampler ? model.samplers[sampler_idx] : r._defaut_sampler
 	}
 
-	// accessors
-	for accessor, i in data.accessors {
-		buffer_view, ok := accessor.buffer_view.?
-		if !ok {
-			name := accessor.name.?
-			log.panicf(
-				"model %s had accessor %d:%s with no buffer view, sparse not supported",
-				file_name,
-				i,
-				name,
-			)
-		}
-		model.accessors[i] = Model_Accessor {
-			buffer = buffer_view,
-			offset = accessor.byte_offset,
-		}
-	}
-
 	//lights
 	if lights_ext_value, has_lights_ext := data.extensions.(json.Object)["KHR_lights_punctual"];
 	   has_lights_ext {
@@ -340,17 +336,44 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 	// materials
 	for gltf_material, i in data.materials {
 		model_material: Model_Material
-		diffuse_metal_rough, has_base_metal := gltf_material.metallic_roughness.?;assert(has_base_metal)
-		diffuse_tex, has_diffuse := diffuse_metal_rough.base_color_texture.?;assert(has_diffuse)
-		metal_rough_tex, has_metal_rough := diffuse_metal_rough.metallic_roughness_texture.?;assert(has_metal_rough)
-		model_material[Mat_Idx.DIFFUSE] = textures[diffuse_tex.index]
-		model_material[Mat_Idx.METAL_ROUGH] = textures[metal_rough_tex.index]
-		normal, has_normal := gltf_material.normal_texture.?;assert(has_normal)
-		model_material[Mat_Idx.NORMAL] = textures[normal.index]
-		occlusion, has_occlusion := gltf_material.occlusion_texture.?;assert(has_occlusion)
-		model_material[Mat_Idx.OCCLUSION] = textures[occlusion.index]
+		model_material.name = gltf_material.name
+		base_info, has_base := gltf_material.metallic_roughness.?
+		if has_base {
+			diffuse_tex, has_diffuse := base_info.base_color_texture.?
+			model_material.bindings[Mat_Idx.DIFFUSE] =
+				has_diffuse ? textures[diffuse_tex.index] : load_pixel_f32(r, base_info.base_color_factor)
+			metal_rough, has_metal_rough := base_info.metallic_roughness_texture.?
+			if has_metal_rough {
+				model_material.bindings[Mat_Idx.METAL_ROUGH] = textures[metal_rough.index]
+			} else {
+				pixel := [4]f32{0, base_info.roughness_factor, base_info.metallic_factor, 1.0}
+				model_material.bindings[Mat_Idx.METAL_ROUGH] = load_pixel_f32(r, pixel)
+			}
+		} else {
+			model_material.bindings[Mat_Idx.DIFFUSE] = r._default_diffuse_binding
+			model_material.bindings[Mat_Idx.METAL_ROUGH] = r._default_orm_binding
+		}
+
+		normal, has_normal := gltf_material.normal_texture.?
+		if has_normal {
+			model_material.bindings[Mat_Idx.NORMAL] = textures[normal.index]
+			model_material.normal_scale = normal.scale
+		} else {
+			model_material.bindings[Mat_Idx.NORMAL] = r._default_normal_binding
+			model_material.normal_scale = 1.0
+		}
+		occlusion, has_occlusion := gltf_material.occlusion_texture.?
+		if has_normal {
+			model_material.bindings[Mat_Idx.OCCLUSION] = textures[occlusion.index]
+			model_material.ao_strength = occlusion.strength
+		} else {
+			model_material.bindings[Mat_Idx.OCCLUSION] = r._default_orm_binding
+			model_material.ao_strength = 1.0
+		}
 		emissive, has_emissive := gltf_material.emissive_texture.?
-		model_material[Mat_Idx.EMISSIVE] = has_emissive ? emissive.index : nil
+		model_material.bindings[Mat_Idx.EMISSIVE] =
+			has_emissive ? textures[emissive.index] : r._default_emissive_binding
+
 		model.materials[i] = model_material
 	}
 
@@ -363,18 +386,49 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		for gltf_primitive, primitive_idx in gltf_mesh.primitives {
 			gltf_ctx.primitive_idx = primitive_idx
 			model_primitive: Model_Primitive
+
 			ok: bool
-			model_primitive.indices, ok = gltf_primitive.indices.?
+			indices_idx: u32
+			indices_idx, ok = gltf_primitive.indices.?
 			if !ok do panic_primitive_err(gltf_ctx, "indices")
 			if gltf_primitive.mode != .Triangles do panic_primitive_err(gltf_ctx, "Triangles mode")
-			model_primitive.pos = get_primitive_attr(gltf_ctx, gltf_primitive, "POSITION")
-			model_primitive.uv = get_primitive_attr(gltf_ctx, gltf_primitive, "TEXCOORD_0")
-			model_primitive.uv1 = get_primitive_attr(gltf_ctx, gltf_primitive, "TEXCOORD_1")
-			model_primitive.normal = get_primitive_attr(gltf_ctx, gltf_primitive, "NORMAL")
-			model_primitive.tangent = get_primitive_attr(gltf_ctx, gltf_primitive, "TANGENT")
+			idxs: [5]u32
+			idxs[Vert_Idx.POS] = get_primitive_attr(gltf_ctx, gltf_primitive, "POSITION")
+			idxs[Vert_Idx.UV] = get_primitive_attr(gltf_ctx, gltf_primitive, "TEXCOORD_0")
+			idxs[Vert_Idx.UV1] = get_primitive_attr(gltf_ctx, gltf_primitive, "TEXCOORD_1")
+			idxs[Vert_Idx.NORMAL] = get_primitive_attr(gltf_ctx, gltf_primitive, "NORMAL")
+			idxs[Vert_Idx.TANGENT] = get_primitive_attr(gltf_ctx, gltf_primitive, "TANGENT")
 			model_primitive.material, ok = gltf_primitive.material.?
 			if !ok do panic_primitive_err(gltf_ctx, "material")
 
+			#unroll for i in 0 ..< len(idxs) {
+				accessor := data.accessors[idxs[i]]
+				bview_idx, has_bview := accessor.buffer_view.?;assert(has_bview)
+				buffer := model.buffers[bview_idx].(^sdl.GPUBuffer)
+				model_primitive.vert_bufs[i] = sdl.GPUBufferBinding {
+					buffer = buffer,
+					offset = accessor.byte_offset,
+				}
+			}
+			indices_accessor := data.accessors[indices_idx]
+			bview_idx, has_bview := indices_accessor.buffer_view.?;assert(has_bview)
+			buffer := model.buffers[bview_idx].(^sdl.GPUBuffer)
+			#partial switch indices_accessor.component_type {
+			case .Unsigned_Short:
+				model_primitive.indices_type = ._16BIT
+			case .Unsigned_Int:
+				model_primitive.indices_type = ._32BIT
+			case:
+				log.panicf(
+					"unexpected gltf indicies component type encountered, %v",
+					indices_accessor.component_type,
+				)
+			}
+			model_primitive.indices = sdl.GPUBufferBinding {
+				buffer = buffer,
+				offset = indices_accessor.byte_offset,
+			}
+			model_primitive.num_indices = indices_accessor.count
 			model_mesh.primitives[primitive_idx] = model_primitive
 		}
 		model.meshes[mesh_idx] = model_mesh

@@ -15,6 +15,7 @@ import lal "core:math/linalg"
 import "core:mem"
 import os "core:os/os2"
 import "core:path/filepath"
+import "core:simd"
 import "core:slice"
 import "core:strings"
 
@@ -30,46 +31,47 @@ MAX_RENDER_NODES :: 4096
 MAX_RENDER_LIGHTS :: 64
 
 Renderer :: struct {
-	cam:                        Camera,
-	ambient_light_color:        [3]f32,
-	model_map:                  map[string]glist.Glist_Idx,
+	cam:                       Camera,
+	ambient_light_color:       [3]f32,
+	model_map:                 map[string]glist.Glist_Idx,
 	// render nececities
-	_gpu:                       ^sdl.GPUDevice,
-	_window:                    ^sdl.Window,
-	_pipeline:                  ^sdl.GPUGraphicsPipeline,
-	_proj_mat:                  matrix[4, 4]f32,
-	_depth_tex:                 ^sdl.GPUTexture,
+	_gpu:                      ^sdl.GPUDevice,
+	_window:                   ^sdl.Window,
+	_pipeline:                 ^sdl.GPUGraphicsPipeline,
+	_proj_mat:                 matrix[4, 4]f32,
+	_depth_tex:                ^sdl.GPUTexture,
 	// defaults
-	_defaut_sampler:            ^sdl.GPUSampler,
-	_default_texture:           ^sdl.GPUTexture,
-	_default_tex_binding:       sdl.GPUTextureSamplerBinding,
+	_defaut_sampler:           ^sdl.GPUSampler,
+	_default_diffuse_binding:  sdl.GPUTextureSamplerBinding,
+	_default_normal_binding:   sdl.GPUTextureSamplerBinding,
+	_default_orm_binding:      sdl.GPUTextureSamplerBinding,
+	_default_emissive_binding: sdl.GPUTextureSamplerBinding,
 
 	// catalog
-	_models:                    glist.Glist(Model),
+	_models:                   glist.Glist(Model),
 
 	// copy
-	_copy_cmd_buf:              ^sdl.GPUCommandBuffer,
-	_copy_pass:                 ^sdl.GPUCopyPass,
+	_copy_cmd_buf:             ^sdl.GPUCommandBuffer,
+	_copy_pass:                ^sdl.GPUCopyPass,
 
 	// transform storage buf
-	_transform_buffer:          Transform_Storage_Buffer,
-	_transform_buffer_cheata:   [MAX_RENDER_NODES]matrix[4, 4]f32,
-	_transform_gpu_buffer:      ^sdl.GPUBuffer,
-	_transform_transfer_buffer: ^sdl.GPUTransferBuffer,
+	_transform_buf:            [MAX_RENDER_NODES]matrix[4, 4]f32,
+	_transform_gpu_buf:        ^sdl.GPUBuffer,
 
 	// lights storage buf
-	_lights_buffer:             [MAX_RENDER_LIGHTS]GPU_Point_Light,
-	_lights_gpu_buffer:         ^sdl.GPUBuffer,
-	_lights_transfer_buffer:    ^sdl.GPUTransferBuffer,
+	_lights_buf:               Lights_Storage_Mem,
+	_lights_gpu_buf:           ^sdl.GPUBuffer,
 
 	// per frame                model     mesh      transform
-	_draw_state:                [dynamic][dynamic][dynamic]u32, // _transform_buffer index
-	_draw_cmd_buf:              ^sdl.GPUCommandBuffer,
-	_draw_render_pass:          ^sdl.GPURenderPass,
-	_lights_rendered:           u32,
-	_transforms_rendered:       u32,
-	_vert_ubo:                  Vert_UBO,
-	_frag_ubo:                  Frag_UBO,
+	_draw_state:               [dynamic][dynamic][dynamic]u32, // _transform_buffer index
+	_frame_transfer_mem:       ^Frame_Transfer_Mem,
+	_frame_transfer_buf:       ^sdl.GPUTransferBuffer,
+	_draw_cmd_buf:             ^sdl.GPUCommandBuffer,
+	_draw_render_pass:         ^sdl.GPURenderPass,
+	_lights_rendered:          u32,
+	_transforms_rendered:      u32,
+	_vert_ubo:                 Vert_UBO,
+	_frag_ubo:                 Frag_Frame_UBO,
 }
 
 Camera :: struct {
@@ -85,15 +87,24 @@ GPU_Point_Light :: struct #align (32) {
 Vert_UBO :: struct {
 	vp: matrix[4, 4]f32,
 }
-Frag_UBO :: struct {
+Frag_Frame_UBO :: struct {
 	view_pos:            [3]f32,
 	rendered_lights:     u32,
 	ambient_light_color: [3]f32,
 }
-Transform_Storage_Buffer :: struct {
+Frag_Draw_UBO :: struct {
+	normal_scale: f32,
+	ao_strength:  f32,
+}
+Frame_Transfer_Mem :: struct {
+	transform: Transform_Storage_Mem,
+	lights:    Lights_Storage_Mem,
+}
+Transform_Storage_Mem :: struct {
 	ms: [MAX_RENDER_NODES]matrix[4, 4]f32,
 	// ns: [MAX_RENDER_NODES]matrix[4, 4]f32,
 }
+Lights_Storage_Mem :: [MAX_RENDER_LIGHTS]GPU_Point_Light
 
 GPU_DEPTH_TEX_FMT :: sdl.GPUTextureFormat.D24_UNORM
 
@@ -103,7 +114,7 @@ init_render_pipeline :: proc(r: ^Renderer) {
 	frag_shader := load_shader(
 		r._gpu,
 		"pbr.spv.frag",
-		{uniform_buffers = 1, storage_buffers = 1, samplers = 5},
+		{uniform_buffers = 2, storage_buffers = 1, samplers = 5},
 	)
 
 	vertex_attrs := []sdl.GPUVertexAttribute {
@@ -180,17 +191,20 @@ init :: proc(
 	r._window = window
 	ok = sdl.SetGPUSwapchainParameters(gpu, window, .SDR_LINEAR, .VSYNC);sdle.err(ok)
 	init_render_pipeline(r)
+	r._models = glist.make(Model, MAX_MODELS) or_return
 
+	// proj & view
 	win_size: [2]i32
 	ok = sdl.GetWindowSize(window, &win_size.x, &win_size.y);sdle.err(ok)
 	aspect := f32(win_size.x) / f32(win_size.y)
-	r.ambient_light_color = ambient_light_color
 	r._proj_mat = lal.matrix4_perspective_f32(
 		lal.to_radians(cam_settings.fovy),
 		aspect,
 		cam_settings.near,
 		cam_settings.far,
 	)
+	r.cam.target = r.cam.pos
+	r.cam.target.z -= 1
 
 	r._depth_tex = sdl.CreateGPUTexture(
 		r._gpu,
@@ -203,32 +217,88 @@ init :: proc(
 			num_levels = 1,
 		},
 	);sdle.err(r._depth_tex)
-	r._defaut_sampler = sdl.CreateGPUSampler(r._gpu, {})
-	r._default_texture = sdl.CreateGPUTexture()
 
-	transform_buf_size := u32(size_of(Transform_Storage_Buffer))
-	r._transform_gpu_buffer = sdl.CreateGPUBuffer(
+	// defaults
+	r._defaut_sampler = sdl.CreateGPUSampler(r._gpu, {})
+	r._default_diffuse_binding = load_pixel(r, {255, 255, 0, 255})
+	r._default_normal_binding = load_pixel(r, {128, 128, 255, 255})
+	r._default_orm_binding = load_pixel(r, {255, 128, 0, 255})
+	r._default_emissive_binding = load_pixel(r, {0, 0, 0, 255})
+
+	r.ambient_light_color = ambient_light_color
+
+	// transfer buf
+	frame_buf_size := u32(size_of(Frame_Transfer_Mem))
+	r._frame_transfer_buf = sdl.CreateGPUTransferBuffer(
+		r._gpu,
+		{usage = .UPLOAD, size = frame_buf_size},
+	);sdle.err(r._frame_transfer_buf)
+
+	transform_buf_size :: u32(size_of(Transform_Storage_Mem))
+	r._transform_gpu_buf = sdl.CreateGPUBuffer(
 		r._gpu,
 		{usage = {.GRAPHICS_STORAGE_READ}, size = transform_buf_size},
-	);sdle.err(r._transform_gpu_buffer)
-	r._transform_transfer_buffer = sdl.CreateGPUTransferBuffer(
-		r._gpu,
-		{usage = .UPLOAD, size = transform_buf_size},
-	);sdle.err(r._transform_transfer_buffer)
+	);sdle.err(r._transform_gpu_buf)
 
-	lights_size := u32(size_of(r._lights_buffer))
-	r._lights_gpu_buffer = sdl.CreateGPUBuffer(
+	lights_size :: u32(size_of(Lights_Storage_Mem))
+	r._lights_gpu_buf = sdl.CreateGPUBuffer(
 		r._gpu,
 		{usage = {.GRAPHICS_STORAGE_READ}, size = lights_size},
-	);sdle.err(r._lights_gpu_buffer)
-	r._lights_transfer_buffer = sdl.CreateGPUTransferBuffer(
-		r._gpu,
-		{usage = .UPLOAD, size = lights_size},
-	);sdle.err(r._lights_transfer_buffer)
+	);sdle.err(r._lights_gpu_buf)
 
-	r._models = glist.make(Model, MAX_MODELS) or_return
-	r.cam.target = r.cam.pos
-	r.cam.target.z -= 1
+	return
+}
+
+@(private)
+load_pixel_f32 :: proc(r: ^Renderer, pixel_f32s: [4]f32) -> (tex: sdl.GPUTextureSamplerBinding) {
+	floats := simd.from_array(pixel_f32s)
+	floats *= 255
+	pixel_simd := cast(#simd[4]u8)floats
+	pixel := simd.to_array(pixel_simd)
+	return load_pixel(r, pixel)
+}
+@(private)
+load_pixel :: proc(r: ^Renderer, pixel: [4]byte) -> (tex: sdl.GPUTextureSamplerBinding) {
+	tex.texture = sdl.CreateGPUTexture(
+		r._gpu,
+		{
+			type = .D2,
+			format = .R8G8B8A8_UNORM_SRGB,
+			usage = {.SAMPLER},
+			width = 1,
+			height = 1,
+			layer_count_or_depth = 1,
+			num_levels = 1,
+		},
+	);sdle.err(tex.texture)
+	tex_transfer_buf := sdl.CreateGPUTransferBuffer(
+		r._gpu,
+		{usage = .UPLOAD, size = 4},
+	);sdle.err(tex_transfer_buf)
+	defer sdl.ReleaseGPUTransferBuffer(r._gpu, tex_transfer_buf)
+	tex_transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
+		r._gpu,
+		tex_transfer_buf,
+		false,
+	);sdle.err(tex_transfer_mem)
+	pixel := pixel
+	mem.copy(tex_transfer_mem, raw_data(pixel[:]), 4)
+
+	sdl.UnmapGPUTransferBuffer(r._gpu, tex_transfer_buf)
+	sdl.UploadToGPUTexture(
+		r._copy_pass,
+		{transfer_buffer = tex_transfer_buf},
+		{texture = tex.texture, w = 1, h = 1, d = 1},
+		false,
+	)
+	sampler_info := sdl.GPUSamplerCreateInfo {
+		min_filter     = .NEAREST,
+		mag_filter     = .NEAREST,
+		mipmap_mode    = .NEAREST,
+		address_mode_u = .CLAMP_TO_EDGE,
+		address_mode_v = .CLAMP_TO_EDGE,
+	}
+	tex.sampler = sdl.CreateGPUSampler(r._gpu, sampler_info)
 	return
 }
 
@@ -302,7 +372,7 @@ draw_node :: proc(r: ^Renderer, req: Draw_Req) {
 		if has_mesh {
 			mesh := req.model.meshes[mesh_idx]
 			transform_idxs := &req.meshes[mesh_idx]
-			r._transform_buffer_cheata[r._transforms_rendered] = sub_req.transform
+			r._transform_buf[r._transforms_rendered] = sub_req.transform
 			append(transform_idxs, r._transforms_rendered)
 			r._transforms_rendered += 1
 		}
@@ -312,7 +382,7 @@ draw_node :: proc(r: ^Renderer, req: Draw_Req) {
 			pos4.xyz = node.pos
 			pos4.a = 1
 			light := req.model.lights[light]
-			r._lights_buffer[r._lights_rendered] = GPU_Point_Light {
+			r._lights_buf[r._lights_rendered] = GPU_Point_Light {
 				pos   = pos4 * req.transform,
 				color = light.color,
 			}
@@ -328,16 +398,15 @@ draw_node :: proc(r: ^Renderer, req: Draw_Req) {
 // call me afterwards to render the frame
 render_frame :: proc(r: ^Renderer) {
 	begin_frame(r)
+	map_frame_transfer_buf(r)
 	draw_calls(r)
-	// log.debug("draw good!")
-	storage_buffer_uploads: {
-		start_copy_pass(r)
-		upload_transform_buffer(r)
-		// log.debug("transform good!")
-		upload_lights_buffer(r)
-		// log.debug("lights good!")
-		end_copy_pass(r)
-	}
+
+	start_copy_pass(r)
+	upload_transform_buf(r)
+	upload_lights_buf(r)
+	unmap_frame_transfer_buf(r)
+	end_copy_pass(r)
+
 	end_frame(r)
 }
 
@@ -376,9 +445,9 @@ begin_frame :: proc(r: ^Renderer) {
 		&depth_target_info,
 	)
 	sdl.BindGPUGraphicsPipeline(r._draw_render_pass, r._pipeline)
-	sdl.BindGPUVertexStorageBuffers(r._draw_render_pass, 0, &(r._transform_gpu_buffer), 1)
+	sdl.BindGPUVertexStorageBuffers(r._draw_render_pass, 0, &(r._transform_gpu_buf), 1)
 	// log.debugf("LIGHT BUFFA=%v", r._lights_gpu_buffer)
-	sdl.BindGPUFragmentStorageBuffers(r._draw_render_pass, 0, &(r._lights_gpu_buffer), 1)
+	sdl.BindGPUFragmentStorageBuffers(r._draw_render_pass, 0, &(r._lights_gpu_buf), 1)
 
 	view := lal.matrix4_look_at_f32(r.cam.pos, r.cam.target, [3]f32{0, 1, 0})
 	vp := r._proj_mat * view
@@ -387,38 +456,62 @@ begin_frame :: proc(r: ^Renderer) {
 	}
 	sdl.PushGPUVertexUniformData(r._draw_cmd_buf, 0, &r._vert_ubo, size_of(Vert_UBO))
 
-	r._frag_ubo = Frag_UBO {
+	r._frag_ubo = Frag_Frame_UBO {
 		rendered_lights     = r._lights_rendered,
 		view_pos            = r.cam.pos,
 		ambient_light_color = r.ambient_light_color,
 	}
-	// log.debugf("gonna render %d lights", rendered_lights)
-	sdl.PushGPUFragmentUniformData(r._draw_cmd_buf, 0, &r._frag_ubo, size_of(Frag_UBO))
+	sdl.PushGPUFragmentUniformData(r._draw_cmd_buf, 0, &r._frag_ubo, size_of(Frag_Frame_UBO))
 }
 
+@(private)
+map_frame_transfer_buf :: proc(r: ^Renderer) {
+	assert(r._frame_transfer_mem == nil)
+	r._frame_transfer_mem =
+	transmute(^Frame_Transfer_Mem)sdl.MapGPUTransferBuffer(
+		r._gpu,
+		r._frame_transfer_buf,
+		true,
+	);sdle.err(r._frame_transfer_mem)
+}
+@(private)
+unmap_frame_transfer_buf :: proc(r: ^Renderer) {
+	assert(r._frame_transfer_mem != nil)
+	sdl.UnmapGPUTransferBuffer(r._gpu, r._frame_transfer_buf)
+	r._frame_transfer_mem = nil
+}
 
 @(private)
 draw_calls :: proc(r: ^Renderer) {
-
 	// log.debug("draw init good!")
 	r._transforms_rendered = 0
+	gpu_transform_mem := &r._frame_transfer_mem.transform
 	for meshes, model_idx in r._draw_state {
 		for transform_idxs, mesh_idx in meshes {
-			draw_instances := u32(0)
+			draw_instances := u32(len(transform_idxs))
 			for transform_idx in transform_idxs {
-				r._transform_buffer.ms[r._transforms_rendered] =
-					r._transform_buffer_cheata[transform_idx]
+				gpu_transform_mem.ms[r._transforms_rendered] = r._transform_buf[transform_idx]
 				// r._transform_buffer.ns[r._nodes_rendered] = lal.inverse_transpose(
 				// 	node._global_transform,
 				// )
-				draw_instances += 1
 				r._transforms_rendered += 1
 			}
+
 			if draw_instances == 0 do continue
 			model := glist.get(&r._models, glist.Glist_Idx(model_idx))
 			mesh := model.meshes[mesh_idx]
-			for primitive in mesh.primitives { 	// TODO actually do the draw call correctly
-				material := model.materials[primitive.material]
+			for &primitive in mesh.primitives {
+				material := &model.materials[primitive.material]
+				draw_ubo := Frag_Draw_UBO {
+					normal_scale = material.normal_scale,
+					ao_strength  = material.ao_strength,
+				}
+				sdl.PushGPUFragmentUniformData(
+					r._draw_cmd_buf,
+					1,
+					&(draw_ubo),
+					size_of(Frag_Draw_UBO),
+				)
 
 				sdl.BindGPUFragmentSamplers(
 					r._draw_render_pass,
@@ -429,13 +522,13 @@ draw_calls :: proc(r: ^Renderer) {
 				sdl.BindGPUVertexBuffers(
 					r._draw_render_pass,
 					0,
-					&(sdl.GPUBufferBinding{buffer = mesh.vert_buf}),
-					1,
+					raw_data(primitive.vert_bufs[:]),
+					len(primitive.vert_bufs),
 				)
 				sdl.BindGPUIndexBuffer(
 					r._draw_render_pass,
-					sdl.GPUBufferBinding{buffer = mesh.idx_buf},
-					._16BIT,
+					primitive.indices,
+					primitive.indices_type,
 				)
 				first_draw_index := r._transforms_rendered - draw_instances
 				// log.debugf(
@@ -446,7 +539,7 @@ draw_calls :: proc(r: ^Renderer) {
 				// )
 				sdl.DrawGPUIndexedPrimitives(
 					r._draw_render_pass,
-					mesh.num_idxs,
+					primitive.num_indices,
 					draw_instances,
 					0,
 					0,
@@ -458,52 +551,35 @@ draw_calls :: proc(r: ^Renderer) {
 	return
 }
 
+
 @(private)
-upload_transform_buffer :: proc(r: ^Renderer) {
-	if r._transforms_rendered == 0 {
-		return
-	}
-	size := size_of(Transform_Storage_Buffer) * r._transforms_rendered
+upload_transform_buf :: proc(r: ^Renderer) {
+	transfer_offset :: u32(offset_of(Frame_Transfer_Mem, transform))
+	transforms_size := size_of(Transform_Storage_Mem) * r._transforms_rendered
 
-	transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
-		r._gpu,
-		r._transform_transfer_buffer,
-		true,
-	);sdle.err(transfer_mem)
-
-	mem.copy(transfer_mem, &r._transform_buffer, int(size))
-
-	sdl.UnmapGPUTransferBuffer(r._gpu, r._transform_transfer_buffer)
 	sdl.UploadToGPUBuffer(
 		r._copy_pass,
-		{transfer_buffer = r._transform_transfer_buffer},
-		{buffer = r._transform_gpu_buffer, size = size},
+		{transfer_buffer = r._frame_transfer_buf, offset = transfer_offset},
+		{buffer = r._transform_gpu_buf, size = transforms_size},
 		true,
 	)
+	r._transforms_rendered = 0
 }
 
 @(private)
-upload_lights_buffer :: proc(r: ^Renderer) {
-	if r._lights_rendered == 0 {
-		return
-	}
+upload_lights_buf :: proc(r: ^Renderer) {
+	transfer_offset :: u32(offset_of(Frame_Transfer_Mem, lights))
+	transfer_mem := transmute([^]byte)&r._frame_transfer_mem.lights
 	size := size_of(GPU_Point_Light) * r._lights_rendered
+	mem.copy(transfer_mem, raw_data(r._lights_buf[:]), int(size))
 
-	transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
-		r._gpu,
-		r._lights_transfer_buffer,
-		true,
-	);sdle.err(transfer_mem)
-
-	mem.copy(transfer_mem, raw_data(r._lights_buffer[:]), int(size))
-
-	sdl.UnmapGPUTransferBuffer(r._gpu, r._lights_transfer_buffer)
 	sdl.UploadToGPUBuffer(
 		r._copy_pass,
-		{transfer_buffer = r._lights_transfer_buffer},
-		{buffer = r._lights_gpu_buffer, size = size},
+		{transfer_buffer = r._frame_transfer_buf, offset = transfer_offset},
+		{buffer = r._lights_gpu_buf, size = size},
 		true,
 	)
+	r._lights_rendered = 0
 }
 
 @(private)
@@ -514,7 +590,5 @@ end_frame :: proc(r: ^Renderer) {
 	ok := sdl.SubmitGPUCommandBuffer(r._draw_cmd_buf);sdle.err(ok)
 	r._draw_render_pass = nil
 	r._draw_cmd_buf = nil
-	r._lights_rendered = 0
-	r._transforms_rendered = 0
 }
 

@@ -17,10 +17,15 @@ layout(set=2, binding=5) readonly buffer Lights {
     Light lights[64];
 };
 
-layout(set=3, binding=0) uniform Frag_UBO {
+layout(set=3, binding=0) uniform Frame_UBO {
     vec3 cam_world_pos;
     uint rendered_lights;
     vec3 ambient_light_color;
+};
+
+layout(set=3, binding=1) uniform Draw_UBO {
+    float normal_scale;
+    float ao_strength;
 };
 
 layout(location=0) in vec3 in_world_pos;
@@ -36,8 +41,8 @@ vec3 calc_normal() {
     vec3 tangent = normalize(in_tangent);
     tangent = normalize(tangent - dot(tangent, normal) * normal);
     vec3 bitangent = cross(tangent, normal);
-    vec3 bump_map_normal = texture(normal_sampler, in_uv).xyz;
-    bump_map_normal = 2.0 * bump_map_normal - vec3(1.0);
+    vec3 bump_map_normal = texture(normal_sampler, in_uv).xyz * 2.0 - 1.0;
+    bump_map_nomal.xy *= normal_scale;
     mat3 TBN = mat3(tangent, bitangent, normal);
     vec3 new_normal = TBN * bump_map_normal;
     new_normal = normalize(new_normal);
