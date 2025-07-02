@@ -5,7 +5,7 @@ const PI = radians(180.0);
 layout(set=2, binding=0) uniform sampler2D diffuse_sampler;
 layout(set=2, binding=1) uniform sampler2D normal_sampler;
 layout(set=2, binding=2) uniform sampler2D metallic_roughness_sampler;
-layout(set=2, binding=3) uniform sampler2D occlusion_sampler;
+layout(set=2, binding=3) uniform sampler2D ao_sampler;
 layout(set=2, binding=4) uniform sampler2D emissive_sampler;
 
 struct Light {
@@ -84,7 +84,8 @@ void main() {
     vec3 emissive = texture(emissive_sampler, in_uv).rgb;
     vec3 normal = calc_normal();
     vec2 metal_rough = texture(orm_sampler, in_uv).gb;
-    float occlusion = texture(occlusion_sampler, in_uv1).r;
+    float ao = texture(ao_sampler, in_uv1).r;
+    ao = mix(1.0, ao, ao_strength);
     float roughness = metal_rough.g;
     float metallic = metal_rough.b;
 
@@ -93,8 +94,7 @@ void main() {
     vec3 color = vec3(0.0);
     for (uint i = 0; i < rendered_lights; i++) {
         Light light = lights[i];
-        vec3 vec_to_light = light.pos.xyz - in_world_pos
-    ;
+        vec3 vec_to_light = light.pos.xyz - in_world_pos;
         float sqr_to_light = dot(vec_to_light, vec_to_light);
         float attenuation = 1.0 / sqr_to_light;
         vec3 radiance = light.color.rgb * attenuation;
@@ -119,7 +119,7 @@ void main() {
         color += (kD * diffuse / PI + specular) * radiance * normal_dot_light;
     }
 
-    vec3 ambient = ambient_light_color * diffuse * occlusion;
+    vec3 ambient = ambient_light_color * diffuse * ao;
     color += ambient;
     color += emissive;
 
