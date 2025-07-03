@@ -431,7 +431,8 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 				idxs: [5]u32
 				idxs[Vert_Idx.POS] = get_primitive_attr(gltf_ctx, gltf_primitive, "POSITION")
 				idxs[Vert_Idx.UV] = get_primitive_attr(gltf_ctx, gltf_primitive, "TEXCOORD_0")
-				idxs[Vert_Idx.UV1] = get_primitive_attr(gltf_ctx, gltf_primitive, "TEXCOORD_1") // TODO make nullable
+				uv1_accessor, has_uv1_accessor := gltf_primitive.attributes["TEXCOORD_1"]
+				idxs[Vert_Idx.UV1] = has_uv1_accessor ? uv1_accessor : idxs[Vert_Idx.UV]
 				idxs[Vert_Idx.NORMAL] = get_primitive_attr(gltf_ctx, gltf_primitive, "NORMAL")
 				idxs[Vert_Idx.TANGENT] = get_primitive_attr(gltf_ctx, gltf_primitive, "TANGENT")
 				model_primitive.material, ok = gltf_primitive.material.?

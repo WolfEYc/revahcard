@@ -14,12 +14,13 @@ struct Light {
 };
 
 layout(set=2, binding=5) readonly buffer Lights {
+    vec3 _lightpad0;
+    uint rendered_lights;
     Light lights[64];
 };
 
 layout(set=3, binding=0) uniform Frame_UBO {
     vec3 cam_world_pos;
-    uint rendered_lights;
     vec3 ambient_light_color;
 };
 
