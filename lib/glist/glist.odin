@@ -37,7 +37,7 @@ insert :: #force_inline proc(
 	return
 }
 
-get :: #force_inline proc(list: ^Glist($T), idx: Glist_Idx) -> (elem: ^T) #no_bounds_check {
+get :: #force_inline proc(list: Glist($T), idx: Glist_Idx) -> (elem: ^T) #no_bounds_check {
 	assert(idx < list._len)
 	return &list._data[idx]
 }

@@ -340,7 +340,6 @@ local_transform :: #force_inline proc(n: Model_Node) -> lal.Matrix4f32 {
 	return lal.matrix4_from_trs_f32(n.pos, n.rot, n.scale)
 }
 
-
 Draw_Req :: struct {
 	model:      ^Model,
 	transforms: []matrix[4, 4]f32,
@@ -520,6 +519,7 @@ unmap_frame_transfer_buf :: proc(r: ^Renderer) {
 @(private)
 upload_transform_buf :: proc(r: ^Renderer) {
 	transfer_offset :: u32(offset_of(Frame_Transfer_Mem, transform))
+	if r._transforms_rendered == 0 do return
 	transforms_size := size_of(Transform_Storage_Mem) * r._transforms_rendered
 
 	sdl.UploadToGPUBuffer(

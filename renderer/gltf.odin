@@ -7,8 +7,10 @@ import "base:runtime"
 import "core:encoding/json"
 import "core:log"
 import "core:mem"
+import "core:path/filepath"
 import "core:simd"
 import "core:slice"
+import "core:strings"
 import sdl "vendor:sdl3"
 import sdli "vendor:sdl3/image"
 
@@ -107,11 +109,11 @@ accessor_size :: proc(accessor: gltf.Accessor) -> (size: u32) {
 	component_size: u32
 	switch accessor.component_type {
 	case .Unsigned_Byte, .Byte:
-		size = 1
+		component_size = 1
 	case .Unsigned_Short, .Short:
-		size = 2
+		component_size = 2
 	case .Unsigned_Int, .Float:
-		size = 4
+		component_size = 4
 	}
 	container_size: u32
 	switch accessor.type {
@@ -176,7 +178,8 @@ load_gltf :: proc(
 	gltf_ctx.file_name = file_name
 	log.infof("loading model: %s", file_name)
 
-	data, load_err := gltf.load_from_file(file_name)
+	file_path := filepath.join({model_dist_dir, file_name}, context.temp_allocator)
+	data, load_err := gltf.load_from_file(file_path)
 	if load_err != nil {
 		log.panicf("err loading model %s, reason: %v", file_name, load_err)
 	}
@@ -195,20 +198,33 @@ load_gltf :: proc(
 		tex_trans_size := u32(0)
 		surfaces := make([]^sdl.Surface, len(data.images), context.temp_allocator)
 		for gltf_image, i in data.images {
-			img_type, has_img_type := gltf_image.type.?
-			assert(has_img_type)
 			buf_view_idx, has_buf_view := gltf_image.buffer_view.?
-			assert(has_buf_view)
-			buf_view := data.buffer_views[buf_view_idx]
-			mem_buf_view: rawptr
-			switch mem in data.buffers[buf_view.buffer].uri {
-			case string:
-				panic("external buffers not supported")
-			case []byte:
-				mem_buf_view = raw_data(mem[buf_view.byte_offset:])
+			uri: gltf.Uri
+			offset: u32
+			length: u32
+			if has_buf_view {
+				buf_view := data.buffer_views[buf_view_idx]
+				uri = data.buffers[buf_view.buffer].uri
+				offset = buf_view.byte_offset
+				length = buf_view.byte_length
+			} else {
+				uri = gltf_image.uri
 			}
-			io_stream := sdl.IOFromMem(mem_buf_view, uint(buf_view.byte_length))
-			disk_surface := sdli.Load_IO(io_stream, true);sdle.err(disk_surface)
+			disk_surface: ^sdl.Surface
+			switch mem in uri {
+			case string:
+				img_path := filepath.join(
+					{dist_dir, texture_dir, mem},
+					context.temp_allocator,
+				) or_return
+				img_path_cstr := strings.clone_to_cstring(img_path, context.temp_allocator)
+				disk_surface = sdli.Load(img_path_cstr)
+			case []byte:
+				mem_buf_view := raw_data(mem[offset:])
+				length = min(length, u32(len(mem)))
+				io_stream := sdl.IOFromMem(mem_buf_view, uint(length))
+				disk_surface = sdli.Load_IO(io_stream, true);sdle.err(disk_surface)
+			}
 			palette := sdl.GetSurfacePalette(disk_surface)
 			surf := sdl.ConvertSurfaceAndColorspace(
 				disk_surface,
@@ -257,7 +273,7 @@ load_gltf :: proc(
 			);sdle.err(tex)
 			sdl.UploadToGPUTexture(
 				r._copy_pass,
-				{transfer_buffer = tex_trans_buf, offset = offset_u32, pixels_per_row = pitch},
+				{transfer_buffer = tex_trans_buf, offset = offset_u32, pixels_per_row = width},
 				{texture = tex, w = width, h = height, d = 1},
 				false,
 			)
@@ -301,8 +317,22 @@ load_gltf :: proc(
 				sampler_info.mag_filter = .NEAREST
 			}
 		}
-		sampler_info.address_mode_u = sdl.GPUSamplerAddressMode(gltf_sampler.wrapS)
-		sampler_info.address_mode_v = sdl.GPUSamplerAddressMode(gltf_sampler.wrapT)
+		switch gltf_sampler.wrapS {
+		case .Repeat:
+			sampler_info.address_mode_u = .REPEAT
+		case .Clamp_To_Edge:
+			sampler_info.address_mode_u = .CLAMP_TO_EDGE
+		case .Mirrored_Repeat:
+			sampler_info.address_mode_u = .MIRRORED_REPEAT
+		}
+		switch gltf_sampler.wrapT {
+		case .Repeat:
+			sampler_info.address_mode_v = .REPEAT
+		case .Clamp_To_Edge:
+			sampler_info.address_mode_v = .CLAMP_TO_EDGE
+		case .Mirrored_Repeat:
+			sampler_info.address_mode_v = .MIRRORED_REPEAT
+		}
 		gpu_sampler := sdl.CreateGPUSampler(r._gpu, sampler_info);sdle.err(gpu_sampler)
 		model.samplers[i] = gpu_sampler
 	}
@@ -318,8 +348,9 @@ load_gltf :: proc(
 	}
 
 	//lights
-	lights_ext_value, has_lights_ext := data.extensions.(json.Object)["KHR_lights_punctual"]
-	if has_lights_ext {
+	if slice.contains(data.extensions_used, "KHR_lights_punctual") {
+		lights_ext_value, has_lights_ext :=
+			data.extensions.(json.Object)["KHR_lights_punctual"];assert(has_lights_ext)
 		lights_arr := lights_ext_value.(json.Array)
 		model.lights = make([]Model_Light, len(lights_arr))
 		for json_obj_light, i in lights_arr {
@@ -395,11 +426,19 @@ load_gltf :: proc(
 		transfer_buffer_size := u32(0)
 		buffer_offseter := make([]u32, len(data.accessors), context.temp_allocator)
 		buffer_sizer := make([]u32, len(data.accessors), context.temp_allocator)
+		log.infof("len(accessors): %d", len(data.accessors))
 		for accessor, i in data.accessors {
 			buffer_offseter[i] = transfer_buffer_size
+			log.infof("count: %d", accessor.count)
 			buffer_sizer[i] = accessor_size(accessor)
+			log.infof("buffa size: %d", buffer_sizer[i])
+			sparse, is_sparse := accessor.sparse.?
+			if is_sparse {
+				log.infof("pain: %v", sparse)
+			}
 			transfer_buffer_size += buffer_sizer[i]
 		}
+		log.infof("tbufsize: %d", transfer_buffer_size)
 		transfer_buf := sdl.CreateGPUTransferBuffer(
 			r._gpu,
 			{usage = .UPLOAD, size = transfer_buffer_size},

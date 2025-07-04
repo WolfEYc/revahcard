@@ -7,7 +7,7 @@ import lal "core:math/linalg"
 import sdl "vendor:sdl3"
 
 import "../renderer"
-freecam_system :: proc(s: ^GameState, r: ^renderer.Renderer) {
+freecam_update :: proc(s: ^GameState, r: ^renderer.Renderer) {
 	defer s.mouse_delta = {0, 0}
 	if !s.freecam do return
 	rotspeed :: 0.05

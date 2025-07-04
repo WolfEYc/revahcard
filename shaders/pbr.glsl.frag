@@ -1,10 +1,10 @@
 #version 460
 
-const PI = radians(180.0);
+#define PI 3.1415926538
 
 layout(set=2, binding=0) uniform sampler2D diffuse_sampler;
 layout(set=2, binding=1) uniform sampler2D normal_sampler;
-layout(set=2, binding=2) uniform sampler2D metallic_roughness_sampler;
+layout(set=2, binding=2) uniform sampler2D metal_rough_sampler;
 layout(set=2, binding=3) uniform sampler2D ao_sampler;
 layout(set=2, binding=4) uniform sampler2D emissive_sampler;
 
@@ -43,14 +43,14 @@ vec3 calc_normal() {
     tangent = normalize(tangent - dot(tangent, normal) * normal);
     vec3 bitangent = cross(tangent, normal);
     vec3 bump_map_normal = texture(normal_sampler, in_uv).xyz * 2.0 - 1.0;
-    bump_map_nomal.xy *= normal_scale;
+    bump_map_normal.xy *= normal_scale;
     mat3 TBN = mat3(tangent, bitangent, normal);
     vec3 new_normal = TBN * bump_map_normal;
     new_normal = normalize(new_normal);
     return new_normal;
 }
 
-vec3 fresnel_schlick(float cos_theta, vec3 F0) {
+vec3 fresnel(float cos_theta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
@@ -81,10 +81,10 @@ float geometry_smith(float normal_dot_view, float normal_dot_light, float roughn
 }
 
 void main() {
-    vec3 diffuse = texture(diffuse_sampler, in_uv);
+    vec3 diffuse = texture(diffuse_sampler, in_uv).rgb;
     vec3 emissive = texture(emissive_sampler, in_uv).rgb;
     vec3 normal = calc_normal();
-    vec2 metal_rough = texture(orm_sampler, in_uv).gb;
+    vec4 metal_rough = texture(metal_rough_sampler, in_uv);
     float ao = texture(ao_sampler, in_uv1).r;
     ao = mix(1.0, ao, ao_strength);
     float roughness = metal_rough.g;
@@ -105,7 +105,7 @@ void main() {
         // Cook-Torrance BRDF
         vec3 F0 = mix(vec3(0.04), diffuse, metallic); // surface reflection at 0 incidence
         float cos_theta = max(dot(halfway, dir_to_cam), 0.0);
-        vec3 F = frensel_schlick(cos_theta, F0);
+        vec3 F = fresnel(cos_theta, F0);
         float NDF = distribution_ggx(normal, halfway, roughness);
         float normal_dot_view = max(dot(normal, dir_to_cam),0.0);
         float normal_dot_light = max(dot(normal, dir_to_light), 0.0);

@@ -1,8 +1,9 @@
 package main
 
-import "../lib/pool"
+import "../lib/glist"
 import "../lib/sdle"
 import "../renderer"
+import "base:runtime"
 import "core:log"
 import "core:math"
 import lal "core:math/linalg"
@@ -40,57 +41,16 @@ main :: proc() {
 	err = renderer.load_all_assets(r)
 	if err != nil do log.panic(err)
 
-	spawn :: proc(r: ^renderer.Renderer, bananers: ^[dynamic]pool.Pool_Key, model: string) {
-		// load some bananers
-		pos: [3]f32
-		rot: [3]f32
-		{
-			pos.x = rand.float32_range(-2, 2)
-			pos.y = rand.float32_range(-1.25, 1.25)
-			pos.z = rand.float32_range(-4, -1.5)
-			rot.x = rand.float32_range(-math.PI, math.PI)
-			rot.y = rand.float32_range(-math.PI, math.PI)
-			rot.z = rand.float32_range(-math.PI, math.PI)
-		}
-
-		rot_quat := lal.quaternion_from_euler_angles_f32(rot[0], rot[1], rot[2], .XYZ)
-
-		banana_key, node_err := renderer.make_node(r, model, pos = pos, rot = rot_quat)
-		if node_err != nil do log.panic(node_err)
-		append(bananers, banana_key)
-	}
-	spawn_light :: proc(r: ^renderer.Renderer, pos: [3]f32) -> (key: pool.Pool_Key) {
-		light_key, err := renderer.make_light(
-			r,
-			{range = 5, color = [3]f32{1, 1, 1}, intensity = 1},
-		)
-		if err != nil do log.panic(err)
-		node_err: renderer.Make_Node_Error
-		key, node_err = renderer.make_node(
-			r,
-			"item-cone",
-			light = light_key,
-			visible = false,
-			pos = pos,
-		)
-		if err != nil do log.panic(err)
-		return
-	}
-	bananers := make([dynamic]pool.Pool_Key, 0, 1)
-
-	for _ in 0 ..< 1 {
-		spawn(r, &bananers, "vehicle-monster-truck")
-		// spawn(r, &bananers, "item-box")
-	}
-
-	light := spawn_light(r, {0, 0, -3})
-
-	renderer.flush_nodes(r)
-	renderer.flush_lights(r)
 	last_ticks := sdl.GetTicks()
-	s := GameState{}
+	s: GameState
+
+	drag_racer_idx, has_drag_racer := r.model_map["vehicle_drag_racer.glb"];assert(has_drag_racer)
+	drag_racer_rot: [3]f32
 
 	main_loop: for {
+		temp_mem := runtime.default_temp_allocator_temp_begin()
+		defer runtime.default_temp_allocator_temp_end(temp_mem)
+
 		new_ticks := sdl.GetTicks()
 		s.deltatime = f32(new_ticks - last_ticks) / 1000
 		last_ticks = new_ticks
@@ -108,29 +68,27 @@ main :: proc() {
 			}
 			freecam_eventhandle(&s, r, ev)
 		}
-		// update game state
-		for banana_key in bananers {
-			banana, ok := renderer.get_node(r, banana_key);assert(ok)
-			x_rotation_amt := lal.to_radians(f32(45) * s.deltatime)
-			y_rotation_amt := lal.to_radians(f32(90) * s.deltatime)
-			z_rotation_amt := lal.to_radians(f32(15) * s.deltatime)
-			// log.debugf("rot_amt=%.2f", rotation_amt)
-			rot_apply := lal.quaternion_from_euler_angles_f32(
-				x_rotation_amt,
-				y_rotation_amt,
-				z_rotation_amt,
-				.XYZ,
-			)
-			banana.rot = rot_apply * banana.rot
-		}
+		// update state
+		freecam_update(&s, r)
 
-		// update camera
-		freecam_system(&s, r)
-
+		drag_racer := glist.get(r._models, drag_racer_idx)
+		num_drag_racer :: 1
+		transforms := make([]matrix[4, 4]f32, num_drag_racer, context.temp_allocator)
+		drag_racer_rot_spd :: 90 * lal.RAD_PER_DEG
+		drag_racer_rot.y += drag_racer_rot_spd * s.deltatime
+		drag_racer_quat := lal.quaternion_from_euler_angles(
+			drag_racer_rot.x,
+			drag_racer_rot.y,
+			drag_racer_rot.z,
+			.XYZ,
+		)
+		transforms[0] = lal.matrix4_from_trs([3]f32{0, 0, 0}, drag_racer_quat, [3]f32{1, 1, 1})
 		// render
-		renderer.flush_nodes(r)
-		renderer.flush_lights(r)
-		renderer.render_frame(r)
+		renderer.begin_frame(r)
+		// draw sh*t
+		renderer.draw_node(r, {model = drag_racer, transforms = transforms}, 0)
+
+		renderer.end_frame(r)
 	}
 }
 
