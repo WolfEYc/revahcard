@@ -44,7 +44,7 @@ main :: proc() {
 	last_ticks := sdl.GetTicks()
 	s: GameState
 
-	drag_racer_idx, has_drag_racer := r.model_map["vehicle_drag_racer.glb"];assert(has_drag_racer)
+	drag_racer_idx, has_drag_racer := r.model_map["vehicle-drag-racer.glb"];assert(has_drag_racer)
 	drag_racer_rot: [3]f32
 
 	main_loop: for {
@@ -76,13 +76,16 @@ main :: proc() {
 		transforms := make([]matrix[4, 4]f32, num_drag_racer, context.temp_allocator)
 		drag_racer_rot_spd :: 90 * lal.RAD_PER_DEG
 		drag_racer_rot.y += drag_racer_rot_spd * s.deltatime
-		drag_racer_quat := lal.quaternion_from_euler_angles(
+		drag_racer_quat := lal.quaternion_from_pitch_yaw_roll_f32(
 			drag_racer_rot.x,
 			drag_racer_rot.y,
 			drag_racer_rot.z,
-			.XYZ,
 		)
-		transforms[0] = lal.matrix4_from_trs([3]f32{0, 0, 0}, drag_racer_quat, [3]f32{1, 1, 1})
+		transforms[0] = lal.matrix4_from_trs(
+			[3]f32{1.2, 0.2, 0.6},
+			drag_racer_quat,
+			[3]f32{1, 1, 1},
+		)
 		// render
 		renderer.begin_frame(r)
 		// draw sh*t

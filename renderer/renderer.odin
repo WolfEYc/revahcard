@@ -217,31 +217,47 @@ init :: proc(
 	);sdle.err(r._depth_tex)
 
 	// defaults
+	start_copy_pass(r)
 	r._defaut_sampler = sdl.CreateGPUSampler(r._gpu, {})
 	r._default_diffuse_binding = load_pixel(r, {255, 255, 0, 255})
 	r._default_normal_binding = load_pixel(r, {128, 128, 255, 255})
 	r._default_orm_binding = load_pixel(r, {255, 128, 0, 255})
 	r._default_emissive_binding = load_pixel(r, {0, 0, 0, 255})
+	end_copy_pass(r)
 
 	r.ambient_light_color = ambient_light_color
 
 	// transfer buf
+	frame_buf_props := sdl.CreateProperties()
+	sdl.SetStringProperty(
+		frame_buf_props,
+		sdl.PROP_GPU_TRANSFERBUFFER_CREATE_NAME_STRING,
+		"frame_buf",
+	)
 	frame_buf_size := u32(size_of(Frame_Transfer_Mem))
 	r._frame_transfer_buf = sdl.CreateGPUTransferBuffer(
 		r._gpu,
-		{usage = .UPLOAD, size = frame_buf_size},
+		{usage = .UPLOAD, size = frame_buf_size, props = frame_buf_props},
 	);sdle.err(r._frame_transfer_buf)
 
 	transform_buf_size :: u32(size_of(Transform_Storage_Mem))
+	transform_buf_props := sdl.CreateProperties()
+	sdl.SetStringProperty(
+		transform_buf_props,
+		sdl.PROP_GPU_BUFFER_CREATE_NAME_STRING,
+		"transform_buf",
+	)
 	r._transform_gpu_buf = sdl.CreateGPUBuffer(
 		r._gpu,
-		{usage = {.GRAPHICS_STORAGE_READ}, size = transform_buf_size},
+		{usage = {.GRAPHICS_STORAGE_READ}, size = transform_buf_size, props = transform_buf_props},
 	);sdle.err(r._transform_gpu_buf)
 
 	lights_size :: u32(size_of(Lights_Storage_Mem))
+	light_buf_props := sdl.CreateProperties()
+	sdl.SetStringProperty(light_buf_props, sdl.PROP_GPU_BUFFER_CREATE_NAME_STRING, "light_buf")
 	r._lights_gpu_buf = sdl.CreateGPUBuffer(
 		r._gpu,
-		{usage = {.GRAPHICS_STORAGE_READ}, size = lights_size},
+		{usage = {.GRAPHICS_STORAGE_READ}, size = lights_size, props = light_buf_props},
 	);sdle.err(r._lights_gpu_buf)
 
 	return
@@ -261,7 +277,7 @@ load_pixel :: proc(r: ^Renderer, pixel: [4]byte) -> (tex: sdl.GPUTextureSamplerB
 		r._gpu,
 		{
 			type = .D2,
-			format = .R8G8B8A8_UNORM_SRGB,
+			format = .R8G8B8A8_UNORM,
 			usage = {.SAMPLER},
 			width = 1,
 			height = 1,
@@ -280,7 +296,7 @@ load_pixel :: proc(r: ^Renderer, pixel: [4]byte) -> (tex: sdl.GPUTextureSamplerB
 		false,
 	);sdle.err(tex_transfer_mem)
 	pixel := pixel
-	mem.copy(tex_transfer_mem, raw_data(pixel[:]), 4)
+	mem.copy_non_overlapping(tex_transfer_mem, raw_data(pixel[:]), 4)
 
 	sdl.UnmapGPUTransferBuffer(r._gpu, tex_transfer_buf)
 	sdl.UploadToGPUTexture(
@@ -330,7 +346,8 @@ load_all_models :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
 	}
 	it := os.read_directory_iterator_create(f)
 	for file_info in os.read_directory_iterator(&it) {
-		load_gltf(r, file_info.name) or_return
+		file_name := strings.clone(file_info.name)
+		load_gltf(r, file_name) or_return
 	}
 	os.read_directory_iterator_destroy(&it)
 	return
@@ -369,11 +386,13 @@ draw_node :: proc(r: ^Renderer, req: Draw_Req, node_idx: u32) {
 	}
 	num_child := len(node.children)
 	if num_child == 0 do return
+	// log.infof("num_child=%d", num_child)
+	// log.infof("num_transform=%d", len(req.transforms))
 
 	temp_mem := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
 	sub_req := req
-	sub_req.transforms = make([]matrix[4, 4]f32, num_child, context.temp_allocator)
+	sub_req.transforms = make([]matrix[4, 4]f32, len(req.transforms), context.temp_allocator)
 	for i := 0; i < num_child; i += 1 {
 		child := node.children[i]
 		child_transform := local_transform(req.model.nodes[child])
@@ -392,11 +411,13 @@ draw_call :: proc(r: ^Renderer, req: Draw_Req, mesh_idx: u32) {
 	draw_instances_u32 := u32(draw_instances)
 	first_draw_index := r._transforms_rendered
 	mem.copy_non_overlapping(
-		raw_data(gpu_transform_mem[r._transforms_rendered:]),
+		raw_data(gpu_transform_mem[first_draw_index:]),
 		raw_data(req.transforms),
-		draw_instances,
+		draw_instances * size_of(matrix[4, 4]f32),
 	)
 	r._transforms_rendered += draw_instances_u32
+	// log.infof("pushed_transform=%v", req.transforms[0])
+	// log.infof("draw_instances=%d", draw_instances_u32)
 	mesh := req.model.meshes[mesh_idx]
 	for &primitive in mesh.primitives {
 		material := &req.model.materials[primitive.material]
@@ -475,7 +496,7 @@ begin_frame :: proc(r: ^Renderer) {
 	}
 	sdl.PushGPUVertexUniformData(r._draw_cmd_buf, 0, &r._vert_ubo, size_of(Vert_UBO))
 	r._frag_ubo.view_pos.xyz = r.cam.pos
-	r._frag_ubo.view_pos.rgb = r.ambient_light_color
+	r._frag_ubo.ambient_light_color.rgb = r.ambient_light_color * 10
 
 	sdl.PushGPUFragmentUniformData(r._draw_cmd_buf, 0, &r._frag_ubo, size_of(Frag_Frame_UBO))
 	map_frame_transfer_buf(r)
@@ -520,7 +541,8 @@ unmap_frame_transfer_buf :: proc(r: ^Renderer) {
 upload_transform_buf :: proc(r: ^Renderer) {
 	transfer_offset :: u32(offset_of(Frame_Transfer_Mem, transform))
 	if r._transforms_rendered == 0 do return
-	transforms_size := size_of(Transform_Storage_Mem) * r._transforms_rendered
+	// log.infof("transforms_rendered=%d", r._transforms_rendered)
+	transforms_size := size_of(matrix[4, 4]f32) * r._transforms_rendered
 
 	sdl.UploadToGPUBuffer(
 		r._copy_pass,

@@ -105,7 +105,7 @@ panic_primitive_err :: proc(gltf_ctx: GLTF_Ctx, missing: string) {
 		missing,
 	)
 }
-accessor_size :: proc(accessor: gltf.Accessor) -> (size: u32) {
+accessor_elem_size :: proc(accessor: gltf.Accessor) -> (size: u32) {
 	component_size: u32
 	switch accessor.component_type {
 	case .Unsigned_Byte, .Byte:
@@ -130,38 +130,44 @@ accessor_size :: proc(accessor: gltf.Accessor) -> (size: u32) {
 	case .Matrix4:
 		container_size = 16
 	}
-	size = component_size * container_size * accessor.count
-	return
+	return component_size * container_size
 }
-accessor_raw :: proc(data: ^gltf.Data, accessor: gltf.Accessor) -> rawptr {
+accessor_size :: proc(accessor: gltf.Accessor) -> (size: u32) {
+	return accessor_elem_size(accessor) * accessor.count
+}
+copy_accessor :: proc(dst: [^]byte, data: ^gltf.Data, accessor: gltf.Accessor) {
 	assert(
 		accessor.buffer_view != nil,
 		"buf_iter_make: selected accessor doesn't have buffer_view",
 	)
 
 	buffer_view := data.buffer_views[accessor.buffer_view.?]
-
 	if _, ok := accessor.sparse.?; ok {
 		assert(false, "Sparse not supported")
-		return nil
-	}
-
-	if _, ok := buffer_view.byte_stride.?; ok {
-		assert(false, "Cannot use a stride")
-		return nil
 	}
 
 	start_byte := accessor.byte_offset + buffer_view.byte_offset
 	uri := data.buffers[buffer_view.buffer].uri
 
+	stride, has_stride := buffer_view.byte_stride.?
 	switch v in uri {
 	case string:
 		assert(false, "URI is string")
-		return nil
 	case []byte:
-		return &v[start_byte]
+		src := raw_data(v[start_byte:])
+		if !has_stride {
+			size := accessor_size(accessor)
+			mem.copy_non_overlapping(dst, src, int(size))
+		} else {
+			elem_size := accessor_elem_size(accessor)
+			elem_size_int := int(elem_size)
+			for i := u32(0); i < accessor.count; i += 1 {
+				dst_idx := i * elem_size
+				src_idx := i * stride
+				mem.copy_non_overlapping(dst[dst_idx:], src[src_idx:], elem_size_int)
+			}
+		}
 	}
-	return nil
 }
 load_gltf :: proc(
 	r: ^Renderer,
@@ -250,7 +256,7 @@ load_gltf :: proc(
 		offset := 0
 		for surf in surfaces {
 			size := int(surf.h * surf.pitch)
-			mem.copy(tex_transfer_mem[offset:], surf.pixels, size)
+			mem.copy_non_overlapping(tex_transfer_mem[offset:], surf.pixels, size)
 			offset += size
 		}
 		sdl.UnmapGPUTransferBuffer(r._gpu, tex_trans_buf)
@@ -348,7 +354,8 @@ load_gltf :: proc(
 	}
 
 	//lights
-	if slice.contains(data.extensions_used, "KHR_lights_punctual") {
+	has_lights := slice.contains(data.extensions_used, "KHR_lights_punctual")
+	if has_lights {
 		lights_ext_value, has_lights_ext :=
 			data.extensions.(json.Object)["KHR_lights_punctual"];assert(has_lights_ext)
 		lights_arr := lights_ext_value.(json.Array)
@@ -392,6 +399,7 @@ load_gltf :: proc(
 				model_material.bindings[Mat_Idx.METAL_ROUGH] = textures[metal_rough.index]
 			} else {
 				pixel := [4]f32{0, base_info.roughness_factor, base_info.metallic_factor, 1.0}
+				log.infof("metal_rough_pixel=%v", pixel)
 				model_material.bindings[Mat_Idx.METAL_ROUGH] = load_pixel_f32(r, pixel)
 			}
 		} else {
@@ -408,7 +416,7 @@ load_gltf :: proc(
 			model_material.normal_scale = 1.0
 		}
 		occlusion, has_occlusion := gltf_material.occlusion_texture.?
-		if has_normal {
+		if has_occlusion {
 			model_material.bindings[Mat_Idx.OCCLUSION] = textures[occlusion.index]
 			model_material.ao_strength = occlusion.strength
 		} else {
@@ -426,19 +434,15 @@ load_gltf :: proc(
 		transfer_buffer_size := u32(0)
 		buffer_offseter := make([]u32, len(data.accessors), context.temp_allocator)
 		buffer_sizer := make([]u32, len(data.accessors), context.temp_allocator)
-		log.infof("len(accessors): %d", len(data.accessors))
 		for accessor, i in data.accessors {
 			buffer_offseter[i] = transfer_buffer_size
-			log.infof("count: %d", accessor.count)
+			// log.infof("count: %d", accessor.count)
 			buffer_sizer[i] = accessor_size(accessor)
-			log.infof("buffa size: %d", buffer_sizer[i])
-			sparse, is_sparse := accessor.sparse.?
-			if is_sparse {
-				log.infof("pain: %v", sparse)
-			}
+			// log.infof("buffa size: %d", buffer_sizer[i])
+			sparse, is_sparse := accessor.sparse.?;assert(!is_sparse)
 			transfer_buffer_size += buffer_sizer[i]
 		}
-		log.infof("tbufsize: %d", transfer_buffer_size)
+		// log.infof("tbufsize: %d", transfer_buffer_size)
 		transfer_buf := sdl.CreateGPUTransferBuffer(
 			r._gpu,
 			{usage = .UPLOAD, size = transfer_buffer_size},
@@ -450,10 +454,9 @@ load_gltf :: proc(
 			false,
 		);sdle.err(transfer_mem)
 		for accessor, i in data.accessors {
-			src := accessor_raw(data, accessor)
-			size := buffer_sizer[i]
 			offset := buffer_offseter[i]
-			mem.copy(transfer_mem[offset:], src, int(size))
+			dst := transfer_mem[offset:]
+			copy_accessor(dst, data, accessor)
 		}
 		sdl.UnmapGPUTransferBuffer(r._gpu, transfer_buf)
 
@@ -489,9 +492,20 @@ load_gltf :: proc(
 						accessor := data.accessors[buf_idx]
 						offset := buffer_offseter[buf_idx]
 						size := buffer_sizer[buf_idx]
+						props: sdl.PropertiesID
+						name, has_name := accessor.name.?
+						if has_name {
+							props = sdl.CreateProperties()
+							name_cstr := strings.clone_to_cstring(name, context.temp_allocator)
+							ok := sdl.SetStringProperty(
+								props,
+								sdl.PROP_GPU_BUFFER_CREATE_NAME_STRING,
+								name_cstr,
+							);sdle.err(ok)
+						}
 						buffer = sdl.CreateGPUBuffer(
 							r._gpu,
-							{usage = {.VERTEX}, size = size},
+							{usage = {.VERTEX}, size = size, props = props},
 						);sdle.err(buffer)
 						sdl.UploadToGPUBuffer(
 							r._copy_pass,
@@ -548,9 +562,12 @@ load_gltf :: proc(
 	for gltf_node, i in data.nodes {
 		node: Model_Node
 		// node lights
-		lights_ext, ok := gltf_node.extensions.(json.Object)["KHR_lights_punctual"]
-		if ok {
-			node.light = u32(lights_ext.(json.Object)["light"].(json.Integer))
+
+		if has_lights {
+			lights_ext, ok := gltf_node.extensions.(json.Object)["KHR_lights_punctual"]
+			if ok {
+				node.light = u32(lights_ext.(json.Object)["light"].(json.Integer))
+			}
 		}
 		// node meshes
 		node.mesh = gltf_node.mesh
@@ -561,6 +578,7 @@ load_gltf :: proc(
 		model.nodes[i] = node
 		name, has_name := gltf_node.name.?
 		if has_name {
+			name = strings.clone(name)
 			model.node_map[name] = u32(i)
 		}
 	}
