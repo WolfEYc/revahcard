@@ -347,9 +347,6 @@ Draw_Req :: struct {
 }
 // instanced draw calls
 draw_node :: proc(r: ^Renderer, req: Draw_Req, node_idx: u32) {
-	temp_mem := runtime.default_temp_allocator_temp_begin()
-	defer runtime.default_temp_allocator_temp_end(temp_mem)
-	transforms := slice.clone(req.transforms, context.temp_allocator)
 	node := req.model.nodes[node_idx]
 	mesh_idx, has_mesh := node.mesh.?
 	if has_mesh {
@@ -362,7 +359,7 @@ draw_node :: proc(r: ^Renderer, req: Draw_Req, node_idx: u32) {
 		pos4.a = 1
 		light := req.model.lights[light]
 		lights := &r._frame_transfer_mem.lights.lights
-		for transform in transforms {
+		for transform in req.transforms {
 			pos := pos4 * transform
 			lights[r._lights_rendered] = GPU_Point_Light {
 				pos   = pos,
@@ -371,12 +368,20 @@ draw_node :: proc(r: ^Renderer, req: Draw_Req, node_idx: u32) {
 			r._lights_rendered += 1
 		}
 	}
-	for child in node.children {
+	num_child := len(node.children)
+	if num_child == 0 do return
+
+	temp_mem := runtime.default_temp_allocator_temp_begin()
+	defer runtime.default_temp_allocator_temp_end(temp_mem)
+	sub_req := req
+	sub_req.transforms = make([]matrix[4, 4]f32, num_child, context.temp_allocator)
+	for i := 0; i < num_child; i += 1 {
+		child := node.children[i]
 		child_transform := local_transform(req.model.nodes[child])
-		for transform, i in transforms {
-			req.transforms[i] = child_transform * transform
+		for transform, i in req.transforms {
+			sub_req.transforms[i] = child_transform * transform
 		}
-		draw_node(r, req, child)
+		draw_node(r, sub_req, child)
 	}
 }
 
@@ -384,25 +389,23 @@ draw_node :: proc(r: ^Renderer, req: Draw_Req, node_idx: u32) {
 draw_call :: proc(r: ^Renderer, req: Draw_Req, mesh_idx: u32) {
 	// log.debug("draw init good!")
 	gpu_transform_mem := &r._frame_transfer_mem.transform.ms
-	draw_instances := u32(len(req.transforms))
-	for transform in req.transforms {
-		gpu_transform_mem[r._transforms_rendered] = transform
-		// r._transform_buffer.ns[r._nodes_rendered] = lal.inverse_transpose(
-		// 	node._global_transform,
-		// )
-		r._transforms_rendered += 1
-	}
-
-	first_draw_index := r._transforms_rendered - draw_instances
+	draw_instances := len(req.transforms)
+	draw_instances_u32 := u32(draw_instances)
+	first_draw_index := r._transforms_rendered
+	mem.copy_non_overlapping(
+		raw_data(gpu_transform_mem[r._transforms_rendered:]),
+		raw_data(req.transforms),
+		draw_instances,
+	)
+	r._transforms_rendered += draw_instances_u32
 	mesh := req.model.meshes[mesh_idx]
 	for &primitive in mesh.primitives {
-		material := req.model.materials[primitive.material]
+		material := &req.model.materials[primitive.material]
 		draw_ubo := Frag_Draw_UBO {
 			normal_scale = material.normal_scale,
 			ao_strength  = material.ao_strength,
 		}
 		sdl.PushGPUFragmentUniformData(r._draw_cmd_buf, 1, &(draw_ubo), size_of(Frag_Draw_UBO))
-
 		sdl.BindGPUFragmentSamplers(
 			r._draw_render_pass,
 			0,
@@ -416,16 +419,10 @@ draw_call :: proc(r: ^Renderer, req: Draw_Req, mesh_idx: u32) {
 			len(primitive.vert_bufs),
 		)
 		sdl.BindGPUIndexBuffer(r._draw_render_pass, primitive.indices, primitive.indices_type)
-		// log.debugf(
-		// 	"mesh.num_idxs=%d draw_instances=%d, first_draw_index=%d",
-		// 	mesh.num_idxs,
-		// 	draw_instances,
-		// 	first_draw_index,
-		// )
 		sdl.DrawGPUIndexedPrimitives(
 			r._draw_render_pass,
 			primitive.num_indices,
-			draw_instances,
+			draw_instances_u32,
 			0,
 			0,
 			first_draw_index,
@@ -489,10 +486,11 @@ end_frame :: proc(r: ^Renderer) {
 	assert(r._draw_render_pass != nil)
 	assert(r._draw_cmd_buf != nil)
 
+	r._frame_transfer_mem.lights.rendered_lights = r._lights_rendered
+	unmap_frame_transfer_buf(r)
 	start_copy_pass(r)
 	upload_transform_buf(r)
 	upload_lights_buf(r)
-	unmap_frame_transfer_buf(r)
 	end_copy_pass(r)
 
 	sdl.EndGPURenderPass(r._draw_render_pass)
@@ -536,8 +534,8 @@ upload_transform_buf :: proc(r: ^Renderer) {
 @(private)
 upload_lights_buf :: proc(r: ^Renderer) {
 	transfer_offset :: u32(offset_of(Frame_Transfer_Mem, lights))
-	r._frame_transfer_mem.lights.rendered_lights = r._lights_rendered
-	size := size_of(GPU_Point_Light) * r._lights_rendered
+	padding_and_length :: 16
+	size := padding_and_length + size_of(GPU_Point_Light) * r._lights_rendered
 
 	sdl.UploadToGPUBuffer(
 		r._copy_pass,

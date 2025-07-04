@@ -161,7 +161,13 @@ accessor_raw :: proc(data: ^gltf.Data, accessor: gltf.Accessor) -> rawptr {
 	}
 	return nil
 }
-load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Error) {
+load_gltf :: proc(
+	r: ^Renderer,
+	file_name: string,
+) -> (
+	model_idx: glist.Glist_Idx,
+	err: runtime.Allocator_Error,
+) {
 	assert(r._copy_pass != nil)
 	assert(r._copy_cmd_buf != nil)
 	temp_mem := runtime.default_temp_allocator_temp_begin()
@@ -182,6 +188,7 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 	model.meshes = make([]Model_Mesh, len(data.meshes))
 	model.nodes = make([]Model_Node, len(data.nodes))
 	model.materials = make([]Model_Material, len(data.materials))
+	model.node_map = make_map_cap(map[string]u32, len(data.nodes))
 
 	{
 		// textures
@@ -311,7 +318,6 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 	}
 
 	//lights
-
 	lights_ext_value, has_lights_ext := data.extensions.(json.Object)["KHR_lights_punctual"]
 	if has_lights_ext {
 		lights_arr := lights_ext_value.(json.Array)
@@ -384,7 +390,6 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 
 		model.materials[i] = model_material
 	}
-
 	{
 		// accessors
 		transfer_buffer_size := u32(0)
@@ -515,10 +520,14 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (err: runtime.Allocator_Er
 		node.rot = gltf_node.rotation
 		node.children = slice.clone(gltf_node.children)
 		model.nodes[i] = node
-	} // end nodes
+		name, has_name := gltf_node.name.?
+		if has_name {
+			model.node_map[name] = u32(i)
+		}
+	}
 
-	model_idx := glist.insert(&r._models, model) or_return
-
+	model_idx = glist.insert(&r._models, model) or_return
+	r.model_map[file_name] = model_idx
 	return
 }
 
