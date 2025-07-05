@@ -6,6 +6,7 @@ import "../lib/sdle"
 import "base:runtime"
 import "core:encoding/json"
 import "core:log"
+import lal "core:math/linalg"
 import "core:mem"
 import "core:path/filepath"
 import "core:simd"
@@ -357,7 +358,10 @@ load_gltf :: proc(
 	if has_lights {
 		lights_ext_value, has_lights_ext :=
 			data.extensions.(json.Object)["KHR_lights_punctual"];assert(has_lights_ext)
-		lights_arr := lights_ext_value.(json.Array)
+		lights_ext_arr, has_lights_arr :=
+			lights_ext_value.(json.Object)["lights"];assert(has_lights_arr)
+
+		lights_arr := lights_ext_arr.(json.Array)
 		model.lights = make([]Model_Light, len(lights_arr))
 		for json_obj_light, i in lights_arr {
 			json_light := json_obj_light.(json.Object)
@@ -371,6 +375,8 @@ load_gltf :: proc(
 				continue
 			}
 			color: [4]f32 = 1.0
+			spectral_mult :: [4]f32{3, 10, 1, 1}
+			max_lumens_per_watt :: 683.0
 			maybe_color, has_color := json_light["color"]
 			if has_color {
 				light_color := maybe_color.(json.Array)
@@ -378,9 +384,13 @@ load_gltf :: proc(
 					color[i] = f32(channel.(json.Float))
 				}
 			}
-			intensity := f32(json_light["intensity"].(json.Float))
+			spectral_sensitivity := lal.dot(color, spectral_mult) / 14.0
+			intensity_candelas := f32(json_light["intensity"].(json.Float))
+			intensity := intensity_candelas / (max_lumens_per_watt * spectral_sensitivity)
+			log.infof("light %d has base color %v", i, color)
 			color *= intensity
 			model.lights[i].color = color
+			log.infof("light %d has color * intensity %v", i, color)
 		}
 	}
 
@@ -422,8 +432,15 @@ load_gltf :: proc(
 			model_material.ao_strength = 1.0
 		}
 		emissive, has_emissive := gltf_material.emissive_texture.?
-		model_material.bindings[Mat_Idx.EMISSIVE] =
-			has_emissive ? textures[emissive.index] : r._default_emissive_binding
+		if has_emissive {
+			model_material.bindings[Mat_Idx.EMISSIVE] = textures[emissive.index]
+		} else {
+			pixel: [4]f32
+			pixel.rgb = gltf_material.emissive_factor
+			pixel.a = 1.0
+			model_material.bindings[Mat_Idx.EMISSIVE] = load_pixel_f32(r, pixel)
+		}
+
 
 		model.materials[i] = model_material
 	}
@@ -561,10 +578,12 @@ load_gltf :: proc(
 		node: Model_Node
 		// node lights
 
-		if has_lights {
-			lights_ext, ok := gltf_node.extensions.(json.Object)["KHR_lights_punctual"]
+		node_exts, has_exts := gltf_node.extensions.(json.Object)
+		if has_lights && has_exts {
+			lights_ext, ok := node_exts["KHR_lights_punctual"]
 			if ok {
-				node.light = u32(lights_ext.(json.Object)["light"].(json.Integer))
+				node.light = u32(lights_ext.(json.Object)["light"].(json.Float))
+				log.infof("node %d has light %d", i, node.light)
 			}
 		}
 		// node meshes
@@ -573,6 +592,7 @@ load_gltf :: proc(
 		node.scale = gltf_node.scale
 		node.rot = gltf_node.rotation
 		node.children = slice.clone(gltf_node.children)
+		log.infof("node %d has children %v", i, node.children)
 		model.nodes[i] = node
 		name, has_name := gltf_node.name.?
 		if has_name {

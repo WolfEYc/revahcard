@@ -72,7 +72,7 @@ Camera :: struct {
 	target: [3]f32,
 }
 
-GPU_Point_Light :: struct #align (32) {
+GPU_Point_Light :: struct #align (16) {
 	pos:   [4]f32, // 16
 	color: [4]f32, // 16
 }
@@ -92,11 +92,11 @@ Frame_Transfer_Mem :: struct {
 	transform: Transform_Storage_Mem,
 	lights:    Lights_Storage_Mem,
 }
-Transform_Storage_Mem :: struct {
+Transform_Storage_Mem :: struct #align (16) {
 	ms: [MAX_RENDER_NODES]matrix[4, 4]f32,
 	// ns: [MAX_RENDER_NODES]matrix[4, 4]f32,
 }
-Lights_Storage_Mem :: struct {
+Lights_Storage_Mem :: struct #align (16) {
 	_lightpad0:      [3]f32, // 12
 	rendered_lights: u32, // 16
 	lights:          [MAX_RENDER_LIGHTS]GPU_Point_Light,
@@ -373,15 +373,11 @@ draw_node :: proc(r: ^Renderer, req: Draw_Req) {
 	}
 	light, has_light := node.light.?
 	if has_light {
-		pos4: [4]f32
-		pos4.xyz = node.pos
-		pos4.a = 1
 		light := req.model.lights[light]
 		lights := &r._frame_transfer_mem.lights.lights
 		for transform in req.transforms {
-			pos := transform * pos4
 			lights[r._lights_rendered] = GPU_Point_Light {
-				pos   = pos,
+				pos   = transform[3],
 				color = light.color,
 			}
 			r._lights_rendered += 1
@@ -500,7 +496,7 @@ begin_frame :: proc(r: ^Renderer) {
 	}
 	sdl.PushGPUVertexUniformData(r._draw_cmd_buf, 0, &r._vert_ubo, size_of(Vert_UBO))
 	r._frag_ubo.view_pos.xyz = r.cam.pos
-	r._frag_ubo.ambient_light_color.rgb = r.ambient_light_color * 10
+	r._frag_ubo.ambient_light_color.rgb = r.ambient_light_color
 
 	sdl.PushGPUFragmentUniformData(r._draw_cmd_buf, 0, &r._frag_ubo, size_of(Frag_Frame_UBO))
 	map_frame_transfer_buf(r)
@@ -511,10 +507,10 @@ end_frame :: proc(r: ^Renderer) {
 	assert(r._draw_cmd_buf != nil)
 
 	r._frame_transfer_mem.lights.rendered_lights = r._lights_rendered
-	unmap_frame_transfer_buf(r)
 	start_copy_pass(r)
 	upload_transform_buf(r)
 	upload_lights_buf(r)
+	unmap_frame_transfer_buf(r)
 	end_copy_pass(r)
 
 	sdl.EndGPURenderPass(r._draw_render_pass)

@@ -91,19 +91,20 @@ void main() {
     float metallic = metal_rough.b;
 
     vec3 dir_to_cam = normalize(cam_world_pos.xyz - in_world_pos);
+    vec3 F0 = mix(vec3(0.04), diffuse, metallic); // surface reflection at 0 incidence
 
     vec3 color = vec3(0.0);
     for (uint i = 0; i < rendered_lights; i++) {
         Light light = lights[i];
+
         vec3 vec_to_light = light.pos.xyz - in_world_pos;
         float sqr_to_light = dot(vec_to_light, vec_to_light);
         float attenuation = 1.0 / sqr_to_light;
         vec3 radiance = light.color.rgb * attenuation;
-        vec3 dir_to_light = vec_to_light * inversesqrt(vec_to_light);
+        vec3 dir_to_light = vec_to_light * inversesqrt(sqr_to_light);
         vec3 halfway = normalize(dir_to_light + dir_to_cam);
 
         // Cook-Torrance BRDF
-        vec3 F0 = mix(vec3(0.04), diffuse, metallic); // surface reflection at 0 incidence
         float cos_theta = max(dot(halfway, dir_to_cam), 0.0);
         vec3 F = fresnel(cos_theta, F0);
         float NDF = distribution_ggx(normal, halfway, roughness);

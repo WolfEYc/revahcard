@@ -50,7 +50,6 @@ main :: proc() {
 	drag_racer_model := glist.get(r.models, drag_racer_idx)
 	light_cube_idx, has_light_cube := r.model_map["white_light_cube.glb"];assert(has_light_cube)
 	light_cube_model := glist.get(r.models, light_cube_idx)
-	drag_racer_rot: [3]f32
 	r.cam.pos.y = 1
 	r.cam.pos.z = 1
 
@@ -108,7 +107,7 @@ main :: proc() {
 			light_cube_req = renderer.Draw_Req {
 				model      = light_cube_model,
 				transforms = transforms,
-				node_idx   = 0,
+				node_idx   = 1,
 			}
 		}
 		// render
