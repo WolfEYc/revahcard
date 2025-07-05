@@ -34,6 +34,7 @@ Renderer :: struct {
 	cam:                       Camera,
 	ambient_light_color:       [3]f32,
 	model_map:                 map[string]glist.Glist_Idx,
+	models:                    glist.Glist(Model),
 	// render nececities
 	_gpu:                      ^sdl.GPUDevice,
 	_window:                   ^sdl.Window,
@@ -46,9 +47,6 @@ Renderer :: struct {
 	_default_normal_binding:   sdl.GPUTextureSamplerBinding,
 	_default_orm_binding:      sdl.GPUTextureSamplerBinding,
 	_default_emissive_binding: sdl.GPUTextureSamplerBinding,
-
-	// catalog
-	_models:                   glist.Glist(Model),
 
 	// copy
 	_copy_cmd_buf:             ^sdl.GPUCommandBuffer,
@@ -146,6 +144,10 @@ init_render_pipeline :: proc(r: ^Renderer) {
 				enable_depth_write = true,
 				compare_op = .LESS,
 			},
+			rasterizer_state = {
+				cull_mode = .BACK,
+				// fill_mode = .LINE,
+			},
 			target_info = {
 				num_color_targets = 1,
 				color_target_descriptions = &(sdl.GPUColorTargetDescription {
@@ -189,7 +191,7 @@ init :: proc(
 	r._window = window
 	ok = sdl.SetGPUSwapchainParameters(gpu, window, .SDR_LINEAR, .VSYNC);sdle.err(ok)
 	init_render_pipeline(r)
-	r._models = glist.make(Model, MAX_MODELS) or_return
+	r.models = glist.make(Model, MAX_MODELS) or_return
 
 	// proj & view
 	win_size: [2]i32
@@ -359,11 +361,12 @@ local_transform :: #force_inline proc(n: Model_Node) -> lal.Matrix4f32 {
 
 Draw_Req :: struct {
 	model:      ^Model,
+	node_idx:   u32,
 	transforms: []matrix[4, 4]f32,
 }
 // instanced draw calls
-draw_node :: proc(r: ^Renderer, req: Draw_Req, node_idx: u32) {
-	node := req.model.nodes[node_idx]
+draw_node :: proc(r: ^Renderer, req: Draw_Req) {
+	node := req.model.nodes[req.node_idx]
 	mesh_idx, has_mesh := node.mesh.?
 	if has_mesh {
 		draw_call(r, req, mesh_idx)
@@ -376,7 +379,7 @@ draw_node :: proc(r: ^Renderer, req: Draw_Req, node_idx: u32) {
 		light := req.model.lights[light]
 		lights := &r._frame_transfer_mem.lights.lights
 		for transform in req.transforms {
-			pos := pos4 * transform
+			pos := transform * pos4
 			lights[r._lights_rendered] = GPU_Point_Light {
 				pos   = pos,
 				color = light.color,
@@ -397,9 +400,10 @@ draw_node :: proc(r: ^Renderer, req: Draw_Req, node_idx: u32) {
 		child := node.children[i]
 		child_transform := local_transform(req.model.nodes[child])
 		for transform, i in req.transforms {
-			sub_req.transforms[i] = child_transform * transform
+			sub_req.transforms[i] = transform * child_transform
 		}
-		draw_node(r, sub_req, child)
+		sub_req.node_idx = child
+		draw_node(r, sub_req)
 	}
 }
 

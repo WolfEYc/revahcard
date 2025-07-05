@@ -199,8 +199,8 @@ load_gltf :: proc(
 	model.materials = make([]Model_Material, len(data.materials))
 	model.node_map = make_map_cap(map[string]u32, len(data.nodes))
 
-	{
-		// textures
+	images: {
+		if len(data.images) == 0 do break images
 		tex_trans_size := u32(0)
 		surfaces := make([]^sdl.Surface, len(data.images), context.temp_allocator)
 		for gltf_image, i in data.images {
@@ -343,7 +343,6 @@ load_gltf :: proc(
 		model.samplers[i] = gpu_sampler
 	}
 
-	// textures
 	textures := make([]sdl.GPUTextureSamplerBinding, len(data.textures), context.temp_allocator)
 	for gltf_tex, i in data.textures {
 		img_idx, has_img := gltf_tex.source.?;assert(has_img)
@@ -399,7 +398,6 @@ load_gltf :: proc(
 				model_material.bindings[Mat_Idx.METAL_ROUGH] = textures[metal_rough.index]
 			} else {
 				pixel := [4]f32{0, base_info.roughness_factor, base_info.metallic_factor, 1.0}
-				log.infof("metal_rough_pixel=%v", pixel)
 				model_material.bindings[Mat_Idx.METAL_ROUGH] = load_pixel_f32(r, pixel)
 			}
 		} else {
@@ -583,7 +581,7 @@ load_gltf :: proc(
 		}
 	}
 
-	model_idx = glist.insert(&r._models, model) or_return
+	model_idx = glist.insert(&r.models, model) or_return
 	r.model_map[file_name] = model_idx
 	return
 }

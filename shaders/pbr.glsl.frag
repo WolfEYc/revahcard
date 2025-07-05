@@ -20,8 +20,8 @@ layout(set=2, binding=5) readonly buffer Lights {
 };
 
 layout(set=3, binding=0) uniform Frame_UBO {
-    vec3 cam_world_pos;
-    vec3 ambient_light_color;
+    vec4 cam_world_pos;
+    vec4 ambient_light_color;
 };
 
 layout(set=3, binding=1) uniform Draw_UBO {
@@ -90,7 +90,7 @@ void main() {
     float roughness = metal_rough.g;
     float metallic = metal_rough.b;
 
-    vec3 dir_to_cam = normalize(cam_world_pos - in_world_pos);
+    vec3 dir_to_cam = normalize(cam_world_pos.xyz - in_world_pos);
 
     vec3 color = vec3(0.0);
     for (uint i = 0; i < rendered_lights; i++) {
@@ -120,7 +120,7 @@ void main() {
         color += (kD * diffuse / PI + specular) * radiance * normal_dot_light;
     }
 
-    vec3 ambient = ambient_light_color * diffuse * ao;
+    vec3 ambient = ambient_light_color.rgb * diffuse * ao;
     color += ambient;
     color += emissive;
 
