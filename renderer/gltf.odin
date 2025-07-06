@@ -241,7 +241,7 @@ load_gltf :: proc(
 				0,
 			);sdle.err(surf)
 			sdl.DestroySurface(disk_surface)
-			surfaces[buf_view_idx] = surf
+			surfaces[i] = surf
 			tex_trans_size += u32(surf.h * surf.pitch)
 		}
 
@@ -583,7 +583,7 @@ load_gltf :: proc(
 			lights_ext, ok := node_exts["KHR_lights_punctual"]
 			if ok {
 				node.light = u32(lights_ext.(json.Object)["light"].(json.Float))
-				log.infof("node %d has light %d", i, node.light)
+				// log.infof("node %d has light %d", i, node.light)
 			}
 		}
 		// node meshes
@@ -592,7 +592,7 @@ load_gltf :: proc(
 		node.scale = gltf_node.scale
 		node.rot = gltf_node.rotation
 		node.children = slice.clone(gltf_node.children)
-		log.infof("node %d has children %v", i, node.children)
+		// log.infof("node %d has children %v", i, node.children)
 		model.nodes[i] = node
 		name, has_name := gltf_node.name.?
 		if has_name {
