@@ -507,10 +507,10 @@ end_frame :: proc(r: ^Renderer) {
 	assert(r._draw_cmd_buf != nil)
 
 	r._frame_transfer_mem.lights.rendered_lights = r._lights_rendered
+	unmap_frame_transfer_buf(r)
 	start_copy_pass(r)
 	upload_transform_buf(r)
 	upload_lights_buf(r)
-	unmap_frame_transfer_buf(r)
 	end_copy_pass(r)
 
 	sdl.EndGPURenderPass(r._draw_render_pass)
