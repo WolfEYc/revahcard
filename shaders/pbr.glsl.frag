@@ -8,20 +8,22 @@ layout(set=2, binding=2) uniform sampler2D metal_rough_sampler;
 layout(set=2, binding=3) uniform sampler2D ao_sampler;
 layout(set=2, binding=4) uniform sampler2D emissive_sampler;
 
-struct Light {
+struct Point_Light {
     vec4 pos;
     vec4 color;
 };
 
-layout(set=2, binding=5) readonly buffer Lights {
+layout(set=2, binding=5) readonly buffer Point_Lights {
     vec3 _lightpad0;
-    uint rendered_lights;
-    Light lights[64];
+    uint num_point_lights;
+    Point_Light point_lights[4];
 };
 
 layout(set=3, binding=0) uniform Frame_UBO {
     vec4 cam_world_pos;
     vec4 ambient_light_color;
+    vec4 dir_to_sun;
+    vec4 sun_color;
 };
 
 layout(set=3, binding=1) uniform Draw_UBO {
@@ -80,6 +82,24 @@ float geometry_smith(float normal_dot_view, float normal_dot_light, float roughn
     return ggx1 * ggx2;
 }
 
+vec3 brdf(vec3 F0, vec3 radiance, vec3 dir_to_light, vec3 dir_to_cam) {
+    vec3 halfway = normalize(dir_to_light + dir_to_cam);
+    float cos_theta = max(dot(halfway, dir_to_cam), 0.0);
+    vec3 F = fresnel(cos_theta, F0);
+    float NDF = distribution_ggx(normal, halfway, roughness);
+    float normal_dot_view = max(dot(normal, dir_to_cam),0.0);
+    float normal_dot_light = max(dot(normal, dir_to_light), 0.0);
+    float G = geometry_smith(normal_dot_view, normal_dot_light, roughness);
+
+    vec3 numerator = NDF * G * F;
+    float denominator = 4.0 * normal_dot_view * normal_dot_light + 0.0001;
+    vec3 specular = numerator / denominator;
+
+    vec3 kD = vec3(1.0) - F;
+    kD *= 1.0 - metallic;
+    return (kD * diffuse / PI + specular) * radiance * normal_dot_light;
+}
+
 void main() {
     vec3 diffuse = texture(diffuse_sampler, in_uv).rgb;
     vec3 emissive = texture(emissive_sampler, in_uv).rgb;
@@ -93,32 +113,17 @@ void main() {
     vec3 dir_to_cam = normalize(cam_world_pos.xyz - in_world_pos);
     vec3 F0 = mix(vec3(0.04), diffuse, metallic); // surface reflection at 0 incidence
 
-    vec3 color = vec3(0.0);
-    for (uint i = 0; i < rendered_lights; i++) {
-        Light light = lights[i];
+    vec3 color = brdf(F0, sun_color.rgb, dir_to_sun.xyz, dir_to_cam);
+    for (uint i = 0; i < num_point_lights; i++) {
+        Light point_light = point_lights[i];
 
         vec3 vec_to_light = light.pos.xyz - in_world_pos;
         float sqr_to_light = dot(vec_to_light, vec_to_light);
         float attenuation = 1.0 / sqr_to_light;
         vec3 radiance = light.color.rgb * attenuation;
         vec3 dir_to_light = vec_to_light * inversesqrt(sqr_to_light);
-        vec3 halfway = normalize(dir_to_light + dir_to_cam);
 
-        // Cook-Torrance BRDF
-        float cos_theta = max(dot(halfway, dir_to_cam), 0.0);
-        vec3 F = fresnel(cos_theta, F0);
-        float NDF = distribution_ggx(normal, halfway, roughness);
-        float normal_dot_view = max(dot(normal, dir_to_cam),0.0);
-        float normal_dot_light = max(dot(normal, dir_to_light), 0.0);
-        float G = geometry_smith(normal_dot_view, normal_dot_light, roughness);
-
-        vec3 numerator = NDF * G * F;
-        float denominator = 4.0 * normal_dot_view * normal_dot_light + 0.0001;
-        vec3 specular = numerator / denominator;
-
-        vec3 kD = vec3(1.0) - F;
-        kD *= 1.0 - metallic;
-        color += (kD * diffuse / PI + specular) * radiance * normal_dot_light;
+        color += brdf(F0, radiance, dir_to_light, dir_to_cam);
     }
 
     vec3 ambient = ambient_light_color.rgb * diffuse * ao;
@@ -126,7 +131,7 @@ void main() {
     color += emissive;
 
     // HDR Reinhard tonemapping
-    color = color / (color + vec3(1.0));    
+    color /= color + vec3(1.0);    
 
     out_color = vec4(color, 1.0);
 }
