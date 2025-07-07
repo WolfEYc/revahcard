@@ -2,28 +2,58 @@
 
 #define PI 3.1415926538
 
+struct Point_Light {
+    vec4 pos;
+    vec4 color;
+};
+
+struct Dir_Light {
+    vec4 dir_to_light;
+    vec4 color;
+};
+
+struct Spot_Light {
+    vec4 pos;
+    vec4 color;
+    vec4 dir;
+    float inner_cone_angle;
+    float outer_cone_angle;
+    vec2 _pad0;
+};
+
+struct Area_Light {
+    vec4 pos;         // xyz = center position, w = unused or light intensity
+    vec4 color;       // rgb = color, a = intensity or scale
+    vec4 right;       // xyz = tangent vector of the rectangle, w = half-width
+    vec4 up;          // xyz = bitangent vector, w = half-height
+    float two_sided;  // 1.0 = light both sides, 0.0 = only front side
+    vec3 _pad;        
+};
+
+
 layout(set=2, binding=0) uniform sampler2D diffuse_sampler;
 layout(set=2, binding=1) uniform sampler2D normal_sampler;
 layout(set=2, binding=2) uniform sampler2D metal_rough_sampler;
 layout(set=2, binding=3) uniform sampler2D ao_sampler;
 layout(set=2, binding=4) uniform sampler2D emissive_sampler;
 
-struct Point_Light {
-    vec4 pos;
-    vec4 color;
-};
+// layout(set=2, binding=5) uniform sampler2DArrayShadow shadow_sampler; //TODO
 
-layout(set=2, binding=5) readonly buffer Point_Lights {
-    vec3 _lightpad0;
+#define LIGHT_MAX 4
+layout(set=2, binding=5) readonly buffer Light_Buf {
+    uint num_dir_lights;
     uint num_point_lights;
-    Point_Light point_lights[4];
+    uint num_spot_lights;
+    uint num_area_lights;
+    Point_Light point_lights[LIGHT_MAX];
+    Dir_Light dir_lights[LIGHT_MAX];
+    Spot_Light spot_lights[LIGHT_MAX];
+    Area_Light area_lights[LIGHT_MAX];
 };
 
 layout(set=3, binding=0) uniform Frame_UBO {
     vec4 cam_world_pos;
     vec4 ambient_light_color;
-    vec4 dir_to_sun;
-    vec4 sun_color;
 };
 
 layout(set=3, binding=1) uniform Draw_UBO {
@@ -124,10 +154,15 @@ void main() {
     brdf_args.dir_to_cam = normalize(cam_world_pos.xyz - in_world_pos);
     brdf_args.F0 = mix(vec3(0.04), brdf_args.diffuse, brdf_args.metallic); // surface reflection at 0 incidence
 
-    brdf_args.radiance = sun_color.rgb;
-    brdf_args.dir_to_light = dir_to_sun.xyz;
+    vec3 color = vec3(0.0);
+    for (uint i = 0; i < num_dir_lights; i++) {
+        Dir_Light dir_light = dir_lights[i];
 
-    vec3 color = brdf();
+        brdf_args.radiance = dir_light.color.rgb;
+        brdf_args.dir_to_light = dir_light.dir_to_light.xyz;
+
+        color += brdf();
+    }
     for (uint i = 0; i < num_point_lights; i++) {
         Point_Light point_light = point_lights[i];
 

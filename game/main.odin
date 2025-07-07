@@ -110,6 +110,7 @@ main :: proc() {
 		}
 		// render
 		renderer.begin_frame(r)
+		renderer.bind_pbr_pipe(r)
 		// draw sh*t
 		renderer.draw_node(r, drag_racer_req)
 		renderer.draw_node(r, light_cube_req)

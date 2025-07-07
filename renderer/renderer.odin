@@ -28,7 +28,7 @@ model_dist_dir :: dist_dir + os.Path_Separator_String + model_dir
 
 MAX_MODELS :: 4096
 MAX_RENDER_NODES :: 4096
-MAX_RENDER_LIGHTS :: 64
+MAX_RENDER_LIGHTS :: 4
 
 Renderer :: struct {
 	cam:                       Camera,
@@ -38,7 +38,7 @@ Renderer :: struct {
 	// render nececities
 	_gpu:                      ^sdl.GPUDevice,
 	_window:                   ^sdl.Window,
-	_pipeline:                 ^sdl.GPUGraphicsPipeline,
+	_pbr_pipeline:             ^sdl.GPUGraphicsPipeline,
 	_proj_mat:                 matrix[4, 4]f32,
 	_depth_tex:                ^sdl.GPUTexture,
 	// defaults
@@ -61,7 +61,6 @@ Renderer :: struct {
 	_frame_transfer_buf:       ^sdl.GPUTransferBuffer,
 	_draw_cmd_buf:             ^sdl.GPUCommandBuffer,
 	_draw_render_pass:         ^sdl.GPURenderPass,
-	_lights_rendered:          u32,
 	_transforms_rendered:      u32,
 	_vert_ubo:                 Vert_UBO,
 	_frag_ubo:                 Frag_Frame_UBO,
@@ -75,6 +74,26 @@ Camera :: struct {
 GPU_Point_Light :: struct #align (16) {
 	pos:   [4]f32, // 16
 	color: [4]f32, // 16
+}
+GPU_Dir_Light :: struct #align (16) {
+	dir_to_light: [4]f32, // 16
+	color:        [4]f32, // 16
+}
+GPU_Spot_Light :: struct #align (16) {
+	pos:              [4]f32,
+	color:            [4]f32,
+	dir:              [4]f32,
+	inner_cone_angle: f32,
+	outer_cone_angle: f32,
+	_pad0:            [2]f32,
+}
+GPU_Area_Light :: struct #align (16) {
+	pos:       [4]f32, // xyz = center position, w = unused or light intensity
+	color:     [4]f32, // rgb = color, a = intensity or scale
+	right:     [4]f32, // xyz = tangent vector of the rectangle, w = half-width
+	up:        [4]f32, // xyz = bitangent vector, w = half-height
+	two_sided: f32, // 1.0 = light both sides, 0.0 = only front side
+	_pad:      [3]f32,
 }
 
 Vert_UBO :: struct {
@@ -96,16 +115,26 @@ Transform_Storage_Mem :: struct #align (16) {
 	ms: [MAX_RENDER_NODES]matrix[4, 4]f32,
 	// ns: [MAX_RENDER_NODES]matrix[4, 4]f32,
 }
+
+Light_Type :: enum {
+	DIR,
+	POINT,
+	SPOT,
+	AREA,
+}
+
 Lights_Storage_Mem :: struct #align (16) {
-	_lightpad0:      [3]f32, // 12
-	rendered_lights: u32, // 16
-	lights:          [MAX_RENDER_LIGHTS]GPU_Point_Light,
+	num_light:    [4]u32,
+	point_lights: [MAX_RENDER_LIGHTS]GPU_Point_Light,
+	dir_lights:   [MAX_RENDER_LIGHTS]GPU_Dir_Light,
+	spot_lights:  [MAX_RENDER_LIGHTS]GPU_Spot_Light,
+	area_lights:  [MAX_RENDER_LIGHTS]GPU_Area_Light,
 }
 
 GPU_DEPTH_TEX_FMT :: sdl.GPUTextureFormat.D24_UNORM
 
 @(private)
-init_render_pipeline :: proc(r: ^Renderer) {
+init_pbr_pipe :: proc(r: ^Renderer) {
 	vert_shader := load_shader(r._gpu, "pbr.spv.vert", {uniform_buffers = 1, storage_buffers = 1})
 	frag_shader := load_shader(
 		r._gpu,
@@ -127,7 +156,7 @@ init_render_pipeline :: proc(r: ^Renderer) {
 		{slot = 3, pitch = size_of([3]f32)},
 		{slot = 4, pitch = size_of([3]f32)},
 	}
-	r._pipeline = sdl.CreateGPUGraphicsPipeline(
+	r._pbr_pipeline = sdl.CreateGPUGraphicsPipeline(
 		r._gpu,
 		{
 			vertex_shader = vert_shader,
@@ -190,7 +219,7 @@ init :: proc(
 	r._gpu = gpu
 	r._window = window
 	ok = sdl.SetGPUSwapchainParameters(gpu, window, .SDR_LINEAR, .VSYNC);sdle.err(ok)
-	init_render_pipeline(r)
+	init_pbr_pipe(r)
 	r.models = glist.make(Model, MAX_MODELS) or_return
 
 	// proj & view
@@ -374,13 +403,14 @@ draw_node :: proc(r: ^Renderer, req: Draw_Req) {
 	light, has_light := node.light.?
 	if has_light {
 		light := req.model.lights[light]
-		lights := &r._frame_transfer_mem.lights.lights
+		lights := &r._frame_transfer_mem.lights
+		num_point_light := &lights.num_light[Light_Type.POINT]
 		for transform in req.transforms {
-			lights[r._lights_rendered] = GPU_Point_Light {
+			lights.point_lights[num_point_light^] = GPU_Point_Light {
 				pos   = transform[3],
 				color = light.color,
 			}
-			r._lights_rendered += 1
+			num_point_light^ += 1
 		}
 	}
 	num_child := len(node.children)
@@ -439,6 +469,7 @@ draw_call :: proc(r: ^Renderer, req: Draw_Req, mesh_idx: u32) {
 			len(primitive.vert_bufs),
 		)
 		sdl.BindGPUIndexBuffer(r._draw_render_pass, primitive.indices, primitive.indices_type)
+		// sdl.GPUIndexedIndirectDrawCommand TODO
 		sdl.DrawGPUIndexedPrimitives(
 			r._draw_render_pass,
 			primitive.num_indices,
@@ -484,7 +515,12 @@ begin_frame :: proc(r: ^Renderer) {
 		1,
 		&depth_target_info,
 	)
-	sdl.BindGPUGraphicsPipeline(r._draw_render_pass, r._pipeline)
+	map_frame_transfer_buf(r)
+	clear_lights_buf(r)
+}
+
+bind_pbr_pipe :: proc(r: ^Renderer) {
+	sdl.BindGPUGraphicsPipeline(r._draw_render_pass, r._pbr_pipeline)
 	sdl.BindGPUVertexStorageBuffers(r._draw_render_pass, 0, &(r._transform_gpu_buf), 1)
 	// log.debugf("LIGHT BUFFA=%v", r._lights_gpu_buffer)
 	sdl.BindGPUFragmentStorageBuffers(r._draw_render_pass, 0, &(r._lights_gpu_buf), 1)
@@ -499,14 +535,12 @@ begin_frame :: proc(r: ^Renderer) {
 	r._frag_ubo.ambient_light_color.rgb = r.ambient_light_color
 
 	sdl.PushGPUFragmentUniformData(r._draw_cmd_buf, 0, &r._frag_ubo, size_of(Frag_Frame_UBO))
-	map_frame_transfer_buf(r)
 }
 
 end_frame :: proc(r: ^Renderer) {
 	assert(r._draw_render_pass != nil)
 	assert(r._draw_cmd_buf != nil)
 
-	r._frame_transfer_mem.lights.rendered_lights = r._lights_rendered
 	unmap_frame_transfer_buf(r)
 	start_copy_pass(r)
 	upload_transform_buf(r)
@@ -554,10 +588,14 @@ upload_transform_buf :: proc(r: ^Renderer) {
 }
 
 @(private)
+clear_lights_buf :: proc(r: ^Renderer) {
+	mem.zero_item(&r._frame_transfer_mem.lights.num_light)
+}
+
+@(private)
 upload_lights_buf :: proc(r: ^Renderer) {
 	transfer_offset :: u32(offset_of(Frame_Transfer_Mem, lights))
-	padding_and_length :: 16
-	size := padding_and_length + size_of(GPU_Point_Light) * r._lights_rendered
+	size :: u32(size_of(Lights_Storage_Mem))
 
 	sdl.UploadToGPUBuffer(
 		r._copy_pass,
@@ -565,6 +603,5 @@ upload_lights_buf :: proc(r: ^Renderer) {
 		{buffer = r._lights_gpu_buf, size = size},
 		true,
 	)
-	r._lights_rendered = 0
 }
 
