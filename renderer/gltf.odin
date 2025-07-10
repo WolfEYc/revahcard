@@ -17,14 +17,15 @@ import sdli "vendor:sdl3/image"
 
 
 Model :: struct {
-	buffers:   []^sdl.GPUBuffer,
+	vert_bufs: [Vert_Idx]^sdl.GPUBuffer,
+	index_buf: ^sdl.GPUBuffer,
 	textures:  []^sdl.GPUTexture,
 	samplers:  []^sdl.GPUSampler,
 	meshes:    []Model_Mesh,
 	nodes:     []Model_Node,
 	lights:    []Model_Light,
 	materials: []Model_Material,
-	node_map:  map[string]u32, //TODO
+	node_map:  map[string]u32,
 }
 
 Model_Material :: struct {
@@ -49,12 +50,15 @@ Vert_Idx :: enum {
 	TANGENT,
 }
 // indexes to accessors
+Vert_Link :: struct {
+	offset:   u32,
+	accessor: u32,
+}
 Model_Primitive :: struct {
-	vert_bufs:    [5]sdl.GPUBufferBinding,
-	indices:      sdl.GPUBufferBinding,
-	indices_type: sdl.GPUIndexElementSize,
-	num_indices:  u32,
-	material:     u32,
+	vert_offset:    u32,
+	indices_offset: u32,
+	num_indices:    u32,
+	material:       u32,
 }
 Model_Node :: struct {
 	pos:      [3]f32,
@@ -192,7 +196,6 @@ load_gltf :: proc(
 	}
 	defer gltf.unload(data)
 	model: Model
-	model.buffers = make([]^sdl.GPUBuffer, len(data.accessors))
 	model.textures = make([]^sdl.GPUTexture, len(data.images))
 	model.samplers = make([]^sdl.GPUSampler, len(data.samplers))
 	model.meshes = make([]Model_Mesh, len(data.meshes))
@@ -446,21 +449,42 @@ load_gltf :: proc(
 	}
 	{
 		// accessors
-		transfer_buffer_size := u32(0)
-		buffer_offseter := make([]u32, len(data.accessors), context.temp_allocator)
-		buffer_sizer := make([]u32, len(data.accessors), context.temp_allocator)
-		for accessor, i in data.accessors {
-			buffer_offseter[i] = transfer_buffer_size
-			// log.infof("count: %d", accessor.count)
-			buffer_sizer[i] = accessor_size(accessor)
-			// log.infof("buffa size: %d", buffer_sizer[i])
-			sparse, is_sparse := accessor.sparse.?;assert(!is_sparse)
-			transfer_buffer_size += buffer_sizer[i]
+		vert_counter := u32(0)
+		idx_counter := u32(0)
+
+		// meshes
+		for gltf_mesh, mesh_idx in data.meshes {
+			gltf_ctx.mesh_name = gltf_mesh.name.?
+			gltf_ctx.mesh_idx = mesh_idx
+			for gltf_primitive, primitive_idx in gltf_mesh.primitives {
+				gltf_ctx.primitive_idx = primitive_idx
+				if gltf_primitive.mode != .Triangles do panic_primitive_err(gltf_ctx, "Triangles mode")
+
+				ok: bool
+				indices_idx: u32
+				indices_idx, ok = gltf_primitive.indices.?
+				if !ok do panic_primitive_err(gltf_ctx, "indices")
+				indices_accessor := data.accessors[indices_idx]
+				idx_counter += indices_accessor.count
+
+				pos_accessor_idx := get_primitive_attr(gltf_ctx, gltf_primitive, "POSITION")
+				pos_accessor := data.accessors[pos_accessor_idx]
+				vert_counter += pos_accessor.count
+			}
 		}
-		// log.infof("tbufsize: %d", transfer_buffer_size)
+		vert_size :: size_of([3]f32) * 3 + size_of([2]f32) * 2
+		idxs_size := idx_counter * size_of(u16)
+		model.index_buf = sdl.CreateGPUBuffer(
+			r._gpu,
+			{usage = {.INDEX}, size = idxs_size},
+		);sdle.err(model.index_buf)
+
+
+		verts_size := vert_counter * vert_size
+		tbuf_size := idxs_size + verts_size
 		transfer_buf := sdl.CreateGPUTransferBuffer(
 			r._gpu,
-			{usage = .UPLOAD, size = transfer_buffer_size},
+			{usage = .UPLOAD, size = tbuf_size},
 		);sdle.err(transfer_buf)
 
 		transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
@@ -468,14 +492,24 @@ load_gltf :: proc(
 			transfer_buf,
 			false,
 		);sdle.err(transfer_mem)
-		for accessor, i in data.accessors {
-			offset := buffer_offseter[i]
-			dst := transfer_mem[offset:]
-			copy_accessor(dst, data, accessor)
-		}
-		sdl.UnmapGPUTransferBuffer(r._gpu, transfer_buf)
 
-		// meshes
+		vert_offsets: [Vert_Idx]u32
+		vert_offset := idxs_size
+		#unroll for vert_idx in Vert_Idx {
+			vert_attr_size: u32
+			switch vert_idx {
+			case .UV, .UV1:
+				vert_attr_size = size_of([2]f32)
+			case .POS, .NORMAL, .TANGENT:
+				vert_attr_size = size_of([3]f32)
+			}
+			vert_offsets[vert_idx] = vert_offset
+			vert_offset += vert_attr_size * vert_counter
+		}
+
+		idx_counter = u32(0)
+		vert_counter = u32(0)
+
 		for gltf_mesh, mesh_idx in data.meshes {
 			gltf_ctx.mesh_name = gltf_mesh.name.?
 			gltf_ctx.mesh_idx = mesh_idx
@@ -487,91 +521,67 @@ load_gltf :: proc(
 
 				ok: bool
 				indices_idx: u32
-				indices_idx, ok = gltf_primitive.indices.?
-				if !ok do panic_primitive_err(gltf_ctx, "indices")
-				if gltf_primitive.mode != .Triangles do panic_primitive_err(gltf_ctx, "Triangles mode")
-				idxs: [5]u32
-				idxs[Vert_Idx.POS] = get_primitive_attr(gltf_ctx, gltf_primitive, "POSITION")
-				idxs[Vert_Idx.UV] = get_primitive_attr(gltf_ctx, gltf_primitive, "TEXCOORD_0")
+				indices_idx, _ = gltf_primitive.indices.?
+				attrs: [Vert_Idx]u32
+				attrs[Vert_Idx.POS] = get_primitive_attr(gltf_ctx, gltf_primitive, "POSITION")
+				attrs[Vert_Idx.UV] = get_primitive_attr(gltf_ctx, gltf_primitive, "TEXCOORD_0")
 				uv1_accessor, has_uv1_accessor := gltf_primitive.attributes["TEXCOORD_1"]
-				idxs[Vert_Idx.UV1] = has_uv1_accessor ? uv1_accessor : idxs[Vert_Idx.UV]
-				idxs[Vert_Idx.NORMAL] = get_primitive_attr(gltf_ctx, gltf_primitive, "NORMAL")
-				idxs[Vert_Idx.TANGENT] = get_primitive_attr(gltf_ctx, gltf_primitive, "TANGENT")
+				attrs[Vert_Idx.UV1] = has_uv1_accessor ? uv1_accessor : attrs[Vert_Idx.UV]
+				attrs[Vert_Idx.NORMAL] = get_primitive_attr(gltf_ctx, gltf_primitive, "NORMAL")
+				attrs[Vert_Idx.TANGENT] = get_primitive_attr(gltf_ctx, gltf_primitive, "TANGENT")
 				model_primitive.material, ok = gltf_primitive.material.?
 				if !ok do panic_primitive_err(gltf_ctx, "material")
 
-				#unroll for i in 0 ..< len(idxs) {
-					buf_idx := idxs[i]
-					buffer := model.buffers[buf_idx]
-					if buffer == nil {
-						accessor := data.accessors[buf_idx]
-						offset := buffer_offseter[buf_idx]
-						size := buffer_sizer[buf_idx]
-						props: sdl.PropertiesID
-						name, has_name := accessor.name.?
-						if has_name {
-							props = sdl.CreateProperties()
-							name_cstr := strings.clone_to_cstring(name, context.temp_allocator)
-							ok := sdl.SetStringProperty(
-								props,
-								sdl.PROP_GPU_BUFFER_CREATE_NAME_STRING,
-								name_cstr,
-							);sdle.err(ok)
-						}
-						buffer = sdl.CreateGPUBuffer(
-							r._gpu,
-							{usage = {.VERTEX}, size = size, props = props},
-						);sdle.err(buffer)
-						sdl.UploadToGPUBuffer(
-							r._copy_pass,
-							{transfer_buffer = transfer_buf, offset = offset},
-							{buffer = buffer, size = size},
-							false,
-						)
-						model.buffers[buf_idx] = buffer
-					}
-					model_primitive.vert_bufs[i] = sdl.GPUBufferBinding {
-						buffer = buffer,
-					}
-				}
+				idx_offset := idx_counter * size_of(u16)
+				idx_accessor := data.accessors[indices_idx]
+				copy_accessor(transfer_mem[idx_offset:], data, idx_accessor)
+				model_primitive.indices_offset = idx_counter
+				model_primitive.num_indices = idx_accessor.count
+				idx_counter += idx_accessor.count
 
-				indices_accessor := data.accessors[indices_idx]
-				buffer := model.buffers[indices_idx]
-				if buffer == nil {
-					offset := buffer_offseter[indices_idx]
-					size := buffer_sizer[indices_idx]
-					buffer = sdl.CreateGPUBuffer(
-						r._gpu,
-						{usage = {.INDEX}, size = size},
-					);sdle.err(buffer)
-					sdl.UploadToGPUBuffer(
-						r._copy_pass,
-						{transfer_buffer = transfer_buf, offset = offset},
-						{buffer = buffer, size = size},
-						false,
-					)
-					model.buffers[indices_idx] = buffer
+				#unroll for vert_idx in Vert_Idx {
+					accessor_idx := attrs[vert_idx]
+					vert_attr_size: u32
+					switch vert_idx {
+					case .UV, .UV1:
+						vert_attr_size = size_of([2]f32)
+					case .POS, .NORMAL, .TANGENT:
+						vert_attr_size = size_of([3]f32)
+					}
+					vert_offset := vert_offsets[vert_idx] + vert_counter * vert_attr_size
+					vert_accessor := data.accessors[accessor_idx]
+					copy_accessor(transfer_mem[vert_offset:], data, vert_accessor)
 				}
-				#partial switch indices_accessor.component_type {
-				case .Unsigned_Short:
-					model_primitive.indices_type = ._16BIT
-				case .Unsigned_Int:
-					model_primitive.indices_type = ._32BIT
-				case:
-					log.panicf(
-						"unexpected gltf indicies component type encountered, %v",
-						indices_accessor.component_type,
-					)
-				}
-				model_primitive.indices = sdl.GPUBufferBinding {
-					buffer = buffer,
-				}
-				model_primitive.num_indices = indices_accessor.count
+				pos_accessor := data.accessors[attrs[Vert_Idx.POS]]
+				model_primitive.vert_offset = vert_counter
+				vert_counter += pos_accessor.count
+
 				model_mesh.primitives[primitive_idx] = model_primitive
 			}
 			model.meshes[mesh_idx] = model_mesh
 		}
-		sdl.ReleaseGPUTransferBuffer(r._gpu, transfer_buf)
+		sdl.UnmapGPUTransferBuffer(r._gpu, transfer_buf)
+		#unroll for vert_idx in Vert_Idx {
+			vert_attr_size: u32
+			switch vert_idx {
+			case .UV, .UV1:
+				vert_attr_size = size_of([2]f32)
+			case .POS, .NORMAL, .TANGENT:
+				vert_attr_size = size_of([3]f32)
+			}
+			size := vert_counter * vert_attr_size
+			model.vert_bufs[vert_idx] = sdl.CreateGPUBuffer(
+				r._gpu,
+				{usage = {.INDEX}, size = size},
+			);sdle.err(model.vert_bufs[vert_idx])
+			sdl.UploadToGPUBuffer(
+				r._copy_pass,
+				{transfer_buffer = transfer_buf, offset = vert_offsets[vert_idx]},
+				{buffer = model.vert_bufs[vert_idx], size = size},
+				false,
+			)
+		}
+		sdl.ReleaseGPUTransferBuffer(r._gpu, transfer_buf) // TODO switch to indirect draw calls
 	}
 	// nodes 
 	for gltf_node, i in data.nodes {
