@@ -48,15 +48,11 @@ Renderer :: struct {
 	_default_orm_binding:      sdl.GPUTextureSamplerBinding,
 	_default_emissive_binding: sdl.GPUTextureSamplerBinding,
 
-	// copy
+	// frame gpu mem
 	_copy_cmd_buf:             ^sdl.GPUCommandBuffer,
 	_copy_pass:                ^sdl.GPUCopyPass,
-
-	// transform storage buf
-	_transform_gpu_buf:        ^sdl.GPUBuffer,
-
-	// lights storage buf
 	_lights_gpu_buf:           ^sdl.GPUBuffer,
+	_transform_gpu_buf:        ^sdl.GPUBuffer,
 	_frame_transfer_mem:       ^Frame_Transfer_Mem,
 	_frame_transfer_buf:       ^sdl.GPUTransferBuffer,
 	_draw_cmd_buf:             ^sdl.GPUCommandBuffer,
@@ -64,6 +60,11 @@ Renderer :: struct {
 	_transforms_rendered:      u32,
 	_vert_ubo:                 Vert_UBO,
 	_frag_ubo:                 Frag_Frame_UBO,
+	_draw_indirect_buf:        ^sdl.GPUBuffer,
+	_len_draw_indirect_buf:    u32,
+	_draw_call_reqs:           [MAX_RENDER_NODES]Draw_Call_Req,
+	_draw_req_transforms:      [MAX_RENDER_NODES]matrix[4, 4]f32,
+	_len_draw_reqs:            u32,
 }
 
 Camera :: struct {
@@ -108,8 +109,9 @@ Frag_Draw_UBO :: struct {
 	ao_strength:  f32,
 }
 Frame_Transfer_Mem :: struct {
-	transform: Transform_Storage_Mem,
-	lights:    Lights_Storage_Mem,
+	transform:  Transform_Storage_Mem,
+	lights:     Lights_Storage_Mem,
+	draw_calls: Draw_Call_Mem,
 }
 Transform_Storage_Mem :: struct #align (16) {
 	ms: [MAX_RENDER_NODES]matrix[4, 4]f32,
@@ -144,17 +146,17 @@ init_pbr_pipe :: proc(r: ^Renderer) {
 
 	vertex_attrs := []sdl.GPUVertexAttribute {
 		{location = 0, buffer_slot = 0, format = .FLOAT3},
-		{location = 1, buffer_slot = 1, format = .FLOAT2},
-		{location = 2, buffer_slot = 2, format = .FLOAT2},
-		{location = 3, buffer_slot = 3, format = .FLOAT3},
-		{location = 4, buffer_slot = 4, format = .FLOAT3},
+		{location = 1, buffer_slot = 1, format = .FLOAT3},
+		{location = 2, buffer_slot = 2, format = .FLOAT3},
+		{location = 3, buffer_slot = 3, format = .FLOAT2},
+		{location = 4, buffer_slot = 4, format = .FLOAT2},
 	}
 	vertex_buffer_descriptions := []sdl.GPUVertexBufferDescription {
 		{slot = 0, pitch = size_of([3]f32)},
-		{slot = 1, pitch = size_of([2]f32)},
-		{slot = 2, pitch = size_of([2]f32)},
-		{slot = 3, pitch = size_of([3]f32)},
-		{slot = 4, pitch = size_of([3]f32)},
+		{slot = 1, pitch = size_of([3]f32)},
+		{slot = 2, pitch = size_of([3]f32)},
+		{slot = 3, pitch = size_of([2]f32)},
+		{slot = 4, pitch = size_of([2]f32)},
 	}
 	r._pbr_pipeline = sdl.CreateGPUGraphicsPipeline(
 		r._gpu,
@@ -384,91 +386,71 @@ load_all_models :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
 	return
 }
 
-local_transform :: #force_inline proc(n: Model_Node) -> lal.Matrix4f32 {
-	return lal.matrix4_from_trs_f32(n.pos, n.rot, n.scale)
-}
 
-Draw_Req :: struct {
-	model:      ^Model,
-	node_idx:   u32,
-	transforms: []matrix[4, 4]f32,
+Draw_Call_Mem :: [MAX_RENDER_NODES]sdl.GPUIndexedIndirectDrawCommand
+
+Draw_Call_Req :: struct {
+	model_idx:     glist.Glist_Idx,
+	primitive_idx: u32,
+	transform_idx: u32,
+}
+Draw_Node_Req :: struct {
+	model_idx: glist.Glist_Idx,
+	node_idx:  u32,
+	transform: matrix[4, 4]f32,
 }
 // instanced draw calls
-draw_node :: proc(r: ^Renderer, req: Draw_Req) {
-	node := req.model.nodes[req.node_idx]
+draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
+	model := glist.get(r.models, req.model_idx)
+	node := model.nodes[req.node_idx]
 	mesh_idx, has_mesh := node.mesh.?
 	if has_mesh {
-		draw_call(r, req, mesh_idx)
+		mesh := model.meshes[mesh_idx]
+		primitive_stop := mesh.primitive_offset + mesh.num_primitives
+		for i := mesh.primitive_offset; i < primitive_stop; i += 1 {
+			r._draw_call_reqs[r._len_draw_reqs] = Draw_Call_Req {
+				model_idx     = req.model_idx,
+				primitive_idx = i,
+				transform_idx = r._len_draw_reqs,
+			}
+			r._draw_req_transforms[r._len_draw_reqs] = req.transform
+			r._len_draw_reqs += 1
+		}
 	}
 	light, has_light := node.light.?
 	if has_light {
-		light := req.model.lights[light]
+		light := model.lights[light]
 		lights := &r._frame_transfer_mem.lights
 		num_point_light := &lights.num_light[Light_Type.POINT]
-		for transform in req.transforms {
-			lights.point_lights[num_point_light^] = GPU_Point_Light {
-				pos   = transform[3],
-				color = light.color,
-			}
-			num_point_light^ += 1
+		lights.point_lights[num_point_light^] = GPU_Point_Light {
+			pos   = req.transform[3],
+			color = light.color,
 		}
+		num_point_light^ += 1
 	}
 	num_child := len(node.children)
 	if num_child == 0 do return
-	// log.infof("num_child=%d", num_child)
-	// log.infof("num_transform=%d", len(req.transforms))
 
 	temp_mem := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
 	sub_req := req
-	sub_req.transforms = make([]matrix[4, 4]f32, len(req.transforms), context.temp_allocator)
 	for i := 0; i < num_child; i += 1 {
 		child := node.children[i]
-		child_transform := local_transform(req.model.nodes[child])
-		for transform, i in req.transforms {
-			sub_req.transforms[i] = transform * child_transform
-		}
+		child_transform := model.nodes[child].mat
+		sub_req.transform = req.transform * child_transform
 		sub_req.node_idx = child
 		draw_node(r, sub_req)
 	}
 }
 
+
 @(private)
-draw_call :: proc(r: ^Renderer, req: Draw_Req, mesh_idx: u32) {
-	// log.debug("draw init good!")
-	gpu_transform_mem := &r._frame_transfer_mem.transform.ms
-	draw_instances := len(req.transforms)
-	draw_instances_u32 := u32(draw_instances)
-	first_draw_index := r._transforms_rendered
-	mem.copy_non_overlapping(
-		raw_data(gpu_transform_mem[first_draw_index:]),
-		raw_data(req.transforms),
-		draw_instances * size_of(matrix[4, 4]f32),
-	)
-	r._transforms_rendered += draw_instances_u32
-	// log.infof("pushed_transform=%v", req.transforms[0])
-	// log.infof("draw_instances=%d", draw_instances_u32)
+add_draw_calls :: proc(r: ^Renderer, req: Draw_Node_Req, mesh_idx: u32) {
+
 	mesh := req.model.meshes[mesh_idx]
 	for &primitive in mesh.primitives {
 		material := &req.model.materials[primitive.material]
-		draw_ubo := Frag_Draw_UBO {
-			normal_scale = material.normal_scale,
-			ao_strength  = material.ao_strength,
-		}
-		sdl.PushGPUFragmentUniformData(r._draw_cmd_buf, 1, &(draw_ubo), size_of(Frag_Draw_UBO))
-		sdl.BindGPUFragmentSamplers(
-			r._draw_render_pass,
-			0,
-			raw_data(material.bindings[:]),
-			len(material.bindings),
-		)
-		sdl.BindGPUVertexBuffers(
-			r._draw_render_pass,
-			0,
-			raw_data(primitive.vert_bufs[:]),
-			len(primitive.vert_bufs),
-		)
-		sdl.BindGPUIndexBuffer(r._draw_render_pass, primitive.indices, primitive.indices_type)
+		primitive.vert_offset
 		// sdl.GPUIndexedIndirectDrawCommand TODO
 		sdl.DrawGPUIndexedPrimitives(
 			r._draw_render_pass,
@@ -482,75 +464,83 @@ draw_call :: proc(r: ^Renderer, req: Draw_Req, mesh_idx: u32) {
 	return
 }
 
-begin_frame :: proc(r: ^Renderer) {
-	assert(r._draw_render_pass == nil)
-	assert(r._draw_cmd_buf == nil)
-	r._draw_cmd_buf = sdl.AcquireGPUCommandBuffer(r._gpu);sdle.err(r._draw_cmd_buf)
-
-	swapchain_tex: ^sdl.GPUTexture
-	ok := sdl.WaitAndAcquireGPUSwapchainTexture(
-		r._draw_cmd_buf,
-		r._window,
-		&swapchain_tex,
-		nil,
-		nil,
-	);sdle.err(ok)
-	if swapchain_tex == nil do return
-
-	color_target := sdl.GPUColorTargetInfo {
-		texture     = swapchain_tex,
-		load_op     = .CLEAR,
-		clear_color = {0, 0, 0, 0},
-		store_op    = .STORE,
-	}
-	depth_target_info := sdl.GPUDepthStencilTargetInfo {
-		texture     = r._depth_tex,
-		load_op     = .CLEAR,
-		clear_depth = 1,
-		store_op    = .DONT_CARE,
-	}
-	r._draw_render_pass = sdl.BeginGPURenderPass(
-		r._draw_cmd_buf,
-		&color_target,
-		1,
-		&depth_target_info,
-	)
+begin_draw :: proc(r: ^Renderer) {
 	map_frame_transfer_buf(r)
 	clear_lights_buf(r)
 }
 
-bind_pbr_pipe :: proc(r: ^Renderer) {
-	sdl.BindGPUGraphicsPipeline(r._draw_render_pass, r._pbr_pipeline)
-	sdl.BindGPUVertexStorageBuffers(r._draw_render_pass, 0, &(r._transform_gpu_buf), 1)
-	// log.debugf("LIGHT BUFFA=%v", r._lights_gpu_buffer)
-	sdl.BindGPUFragmentStorageBuffers(r._draw_render_pass, 0, &(r._lights_gpu_buf), 1)
-
-	view := lal.matrix4_look_at_f32(r.cam.pos, r.cam.target, [3]f32{0, 1, 0})
-	vp := r._proj_mat * view
-	r._vert_ubo = Vert_UBO {
-		vp = vp,
-	}
-	sdl.PushGPUVertexUniformData(r._draw_cmd_buf, 0, &r._vert_ubo, size_of(Vert_UBO))
-	r._frag_ubo.view_pos.xyz = r.cam.pos
-	r._frag_ubo.ambient_light_color.rgb = r.ambient_light_color
-
-	sdl.PushGPUFragmentUniformData(r._draw_cmd_buf, 0, &r._frag_ubo, size_of(Frag_Frame_UBO))
-}
-
-end_frame :: proc(r: ^Renderer) {
-	assert(r._draw_render_pass != nil)
-	assert(r._draw_cmd_buf != nil)
-
+end_draw :: proc(r: ^Renderer) {
+	sort_draw_call_reqs(r)
+	copy_draw_call_reqs(r)
 	unmap_frame_transfer_buf(r)
 	start_copy_pass(r)
 	upload_transform_buf(r)
 	upload_lights_buf(r)
+	upload_draw_call_buf(r)
 	end_copy_pass(r)
+}
 
-	sdl.EndGPURenderPass(r._draw_render_pass)
-	ok := sdl.SubmitGPUCommandBuffer(r._draw_cmd_buf);sdle.err(ok)
-	r._draw_render_pass = nil
-	r._draw_cmd_buf = nil
+@(private)
+sort_draw_call_reqs :: proc(r: ^Renderer) {
+	slice.sort_by_cmp(
+		r._draw_call_reqs[:r._len_draw_reqs],
+		proc(i, j: Draw_Call_Req) -> (ordering: slice.Ordering) {
+			model_ordering := slice.cmp(i.model_idx, j.model_idx)
+			switch model_ordering {
+			case .Less, .Greater:
+				ordering = model_ordering
+			case .Equal:
+				ordering_primitive := slice.cmp(i.primitive_idx, j.primitive_idx)
+				switch ordering_primitive {
+				case .Less, .Greater:
+					ordering = ordering_primitive
+				case .Equal:
+					ordering = slice.cmp(i.transform_idx, j.transform_idx)
+				}
+			}
+			return
+		},
+	)
+}
+
+@(private)
+bind_model :: #force_inline proc(r: ^Renderer, model_idx: glist.Glist_Idx) {
+	model := glist.get(r.models, model_idx)
+	sdl.BindGPUVertexBuffers(
+		r._draw_render_pass,
+		0,
+		transmute([^]sdl.GPUBufferBinding)&model.vert_bufs,
+		len(model.vert_bufs),
+	)
+	sdl.BindGPUIndexBuffer(r._draw_render_pass, model.index_buf, ._16BIT)
+}
+
+@(private)
+bind_material :: #force_inline proc(r: ^Renderer, model_idx: glist.Glist_Idx, material_idx: u32) {
+	model := glist.get(r.models, model_idx)
+	material := model.materials[material_idx]
+	draw_ubo := Frag_Draw_UBO {
+		normal_scale = material.normal_scale,
+		ao_strength  = material.ao_strength,
+	}
+	sdl.PushGPUFragmentUniformData(r._draw_cmd_buf, 1, &(draw_ubo), size_of(Frag_Draw_UBO))
+	sdl.BindGPUFragmentSamplers(
+		r._draw_render_pass,
+		0,
+		transmute([^]sdl.GPUTextureSamplerBinding)&material.bindings,
+		len(material.bindings),
+	)
+}
+
+@(private)
+copy_draw_call_reqs :: proc(r: ^Renderer) {
+	if r._len_draw_reqs == 0 do return
+
+	last_req := r._draw_call_reqs[0]
+	bind_model(r, last_req.model_idx) // TODO wait this is all wrong, we aint doin PBR yet
+	for req in r._draw_call_reqs[1:r._len_draw_reqs] {
+
+	}
 }
 
 @(private)
@@ -570,6 +560,19 @@ unmap_frame_transfer_buf :: proc(r: ^Renderer) {
 	r._frame_transfer_mem = nil
 }
 
+@(private)
+upload_draw_call_buf :: proc(r: ^Renderer) {
+	transfer_offset :: u32(offset_of(Frame_Transfer_Mem, draw_calls))
+	if r._len_draw_indirect_buf == 0 do return
+	size := size_of(sdl.GPUIndexedIndirectDrawCommand) * r._len_draw_indirect_buf
+	sdl.UploadToGPUBuffer(
+		r._copy_pass,
+		{transfer_buffer = r._frame_transfer_buf, offset = transfer_offset},
+		{buffer = r._draw_indirect_buf, size = size},
+		true,
+	)
+	r._len_draw_indirect_buf = 0
+}
 
 @(private)
 upload_transform_buf :: proc(r: ^Renderer) {
@@ -603,5 +606,71 @@ upload_lights_buf :: proc(r: ^Renderer) {
 		{buffer = r._lights_gpu_buf, size = size},
 		true,
 	)
+}
+
+begin_screen_render :: proc(r: ^Renderer) {
+	assert(r._draw_render_pass == nil)
+	assert(r._draw_cmd_buf == nil)
+	r._draw_cmd_buf = sdl.AcquireGPUCommandBuffer(r._gpu);sdle.err(r._draw_cmd_buf)
+
+	swapchain_tex: ^sdl.GPUTexture
+	ok := sdl.WaitAndAcquireGPUSwapchainTexture(
+		r._draw_cmd_buf,
+		r._window,
+		&swapchain_tex,
+		nil,
+		nil,
+	);sdle.err(ok)
+	if swapchain_tex == nil do return
+
+	color_target := sdl.GPUColorTargetInfo {
+		texture     = swapchain_tex,
+		load_op     = .CLEAR,
+		clear_color = {0, 0, 0, 0},
+		store_op    = .STORE,
+	}
+	depth_target_info := sdl.GPUDepthStencilTargetInfo {
+		texture     = r._depth_tex,
+		load_op     = .CLEAR,
+		clear_depth = 1,
+		store_op    = .DONT_CARE,
+	}
+	r._draw_render_pass = sdl.BeginGPURenderPass(
+		r._draw_cmd_buf,
+		&color_target,
+		1,
+		&depth_target_info,
+	)
+}
+
+opaque_pass :: proc(r: ^Renderer) {
+	sdl.BindGPUGraphicsPipeline(r._draw_render_pass, r._pbr_pipeline)
+	sdl.BindGPUVertexStorageBuffers(r._draw_render_pass, 0, &(r._transform_gpu_buf), 1)
+	// log.debugf("LIGHT BUFFA=%v", r._lights_gpu_buffer)
+	sdl.BindGPUFragmentStorageBuffers(r._draw_render_pass, 0, &(r._lights_gpu_buf), 1)
+
+	view := lal.matrix4_look_at_f32(r.cam.pos, r.cam.target, [3]f32{0, 1, 0})
+	vp := r._proj_mat * view
+	r._vert_ubo = Vert_UBO {
+		vp = vp,
+	}
+	sdl.PushGPUVertexUniformData(r._draw_cmd_buf, 0, &r._vert_ubo, size_of(Vert_UBO))
+	r._frag_ubo.view_pos.xyz = r.cam.pos
+	r._frag_ubo.ambient_light_color.rgb = r.ambient_light_color
+
+	sdl.PushGPUFragmentUniformData(r._draw_cmd_buf, 0, &r._frag_ubo, size_of(Frag_Frame_UBO))
+
+	// draw calls
+}
+
+
+end_frame :: proc(r: ^Renderer) {
+	assert(r._draw_render_pass != nil)
+	assert(r._draw_cmd_buf != nil)
+
+	sdl.EndGPURenderPass(r._draw_render_pass)
+	ok := sdl.SubmitGPUCommandBuffer(r._draw_cmd_buf);sdle.err(ok)
+	r._draw_render_pass = nil
+	r._draw_cmd_buf = nil
 }
 

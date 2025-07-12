@@ -62,10 +62,10 @@ layout(set=3, binding=1) uniform Draw_UBO {
 };
 
 layout(location=0) in vec3 in_world_pos;
-layout(location=1) in vec2 in_uv;
-layout(location=2) in vec2 in_uv1;
-layout(location=3) in vec3 in_normal;
-layout(location=4) in vec3 in_tangent;
+layout(location=1) in vec3 in_normal;
+layout(location=2) in vec3 in_tangent;
+layout(location=3) in vec2 in_uv;
+layout(location=4) in vec2 in_uv1;
 
 layout(location=0) out vec4 out_color;
 

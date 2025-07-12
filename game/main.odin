@@ -75,7 +75,7 @@ main :: proc() {
 		// update state
 		freecam_update(&s, r)
 
-		drag_racer_req: renderer.Draw_Req
+		drag_racer_req: renderer.Draw_Node_Req
 		{
 			num_instances :: 1
 			deg_per_s :: 90
@@ -85,13 +85,13 @@ main :: proc() {
 			quat := lal.quaternion_from_pitch_yaw_roll_f32(0, rads, 0)
 			transforms := make([]matrix[4, 4]f32, num_instances, context.temp_allocator)
 			transforms[0] = lal.matrix4_from_trs([3]f32{0, 0, 0}, quat, [3]f32{1, 1, 1})
-			drag_racer_req = renderer.Draw_Req {
+			drag_racer_req = renderer.Draw_Node_Req {
 				model      = drag_racer_model,
 				transforms = transforms,
 				node_idx   = drag_racer_node,
 			}
 		}
-		light_cube_req: renderer.Draw_Req
+		light_cube_req: renderer.Draw_Node_Req
 		{
 			num_instances :: 2
 			deg_per_s :: 90
@@ -102,7 +102,7 @@ main :: proc() {
 			transforms := make([]matrix[4, 4]f32, num_instances, context.temp_allocator)
 			transforms[0] = lal.matrix4_from_trs([3]f32{1, 0.7, 0}, quat, [3]f32{1, 1, 1})
 			transforms[1] = lal.matrix4_from_trs([3]f32{-1, 0.7, 0}, quat, [3]f32{1, 1, 1})
-			light_cube_req = renderer.Draw_Req {
+			light_cube_req = renderer.Draw_Node_Req {
 				model      = light_cube_model,
 				transforms = transforms,
 				node_idx   = 1,
@@ -110,7 +110,7 @@ main :: proc() {
 		}
 		// render
 		renderer.begin_frame(r)
-		renderer.bind_pbr_pipe(r)
+		renderer.pbr_pass(r)
 		// draw sh*t
 		renderer.draw_node(r, drag_racer_req)
 		renderer.draw_node(r, light_cube_req)
