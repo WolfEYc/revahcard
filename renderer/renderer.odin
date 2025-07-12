@@ -444,26 +444,6 @@ draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 }
 
 
-@(private)
-add_draw_calls :: proc(r: ^Renderer, req: Draw_Node_Req, mesh_idx: u32) {
-
-	mesh := req.model.meshes[mesh_idx]
-	for &primitive in mesh.primitives {
-		material := &req.model.materials[primitive.material]
-		primitive.vert_offset
-		// sdl.GPUIndexedIndirectDrawCommand TODO
-		sdl.DrawGPUIndexedPrimitives(
-			r._draw_render_pass,
-			primitive.num_indices,
-			draw_instances_u32,
-			0,
-			0,
-			first_draw_index,
-		)
-	}
-	return
-}
-
 begin_draw :: proc(r: ^Renderer) {
 	map_frame_transfer_buf(r)
 	clear_lights_buf(r)
@@ -509,7 +489,7 @@ bind_model :: #force_inline proc(r: ^Renderer, model_idx: glist.Glist_Idx) {
 	sdl.BindGPUVertexBuffers(
 		r._draw_render_pass,
 		0,
-		transmute([^]sdl.GPUBufferBinding)&model.vert_bufs,
+		cast([^]sdl.GPUBufferBinding)&model.vert_bufs,
 		len(model.vert_bufs),
 	)
 	sdl.BindGPUIndexBuffer(r._draw_render_pass, model.index_buf, ._16BIT)
@@ -527,7 +507,7 @@ bind_material :: #force_inline proc(r: ^Renderer, model_idx: glist.Glist_Idx, ma
 	sdl.BindGPUFragmentSamplers(
 		r._draw_render_pass,
 		0,
-		transmute([^]sdl.GPUTextureSamplerBinding)&material.bindings,
+		cast([^]sdl.GPUTextureSamplerBinding)&material.bindings,
 		len(material.bindings),
 	)
 }
