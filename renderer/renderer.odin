@@ -52,12 +52,12 @@ Renderer :: struct {
 	_copy_cmd_buf:             ^sdl.GPUCommandBuffer,
 	_copy_pass:                ^sdl.GPUCopyPass,
 	_lights_gpu_buf:           ^sdl.GPUBuffer,
+	_lights_cpu:               Lights_Storage_Mem,
 	_transform_gpu_buf:        ^sdl.GPUBuffer,
 	_frame_transfer_mem:       ^Frame_Transfer_Mem,
 	_frame_transfer_buf:       ^sdl.GPUTransferBuffer,
-	_draw_cmd_buf:             ^sdl.GPUCommandBuffer,
-	_draw_render_pass:         ^sdl.GPURenderPass,
-	_transforms_rendered:      u32,
+	_render_cmd_buf:           ^sdl.GPUCommandBuffer,
+	_render_pass:              ^sdl.GPURenderPass,
 	_vert_ubo:                 Vert_UBO,
 	_frag_ubo:                 Frag_Frame_UBO,
 	_draw_indirect_buf:        ^sdl.GPUBuffer,
@@ -386,20 +386,21 @@ load_all_models :: proc(r: ^Renderer) -> (err: runtime.Allocator_Error) {
 	return
 }
 
-
 Draw_Call_Mem :: [MAX_RENDER_NODES]sdl.GPUIndexedIndirectDrawCommand
 
-Draw_Call_Req :: struct {
-	model_idx:     glist.Glist_Idx,
-	primitive_idx: u32,
-	transform_idx: u32,
+Draw_Call_Sort_Idx :: enum {
+	MODEL_IDX,
+	MATERIAL_IDX,
+	PRIMITIVE_IDX,
+	TRANSFORM_IDX,
 }
+Draw_Call_Req :: #simd[len(Draw_Call_Sort_Idx)]u32
 Draw_Node_Req :: struct {
 	model_idx: glist.Glist_Idx,
 	node_idx:  u32,
 	transform: matrix[4, 4]f32,
 }
-// instanced draw calls
+
 draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 	model := glist.get(r.models, req.model_idx)
 	node := model.nodes[req.node_idx]
@@ -408,10 +409,12 @@ draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 		mesh := model.meshes[mesh_idx]
 		primitive_stop := mesh.primitive_offset + mesh.num_primitives
 		for i := mesh.primitive_offset; i < primitive_stop; i += 1 {
+			primitive := model.primitives[i]
 			r._draw_call_reqs[r._len_draw_reqs] = Draw_Call_Req {
-				model_idx     = req.model_idx,
-				primitive_idx = i,
-				transform_idx = r._len_draw_reqs,
+				Draw_Call_Sort_Idx.MODEL_IDX     = req.model_idx,
+				Draw_Call_Sort_Idx.MATERIAL_IDX  = primitive.material,
+				Draw_Call_Sort_Idx.PRIMITIVE_IDX = i,
+				Draw_Call_Sort_Idx.TRANSFORM_IDX = r._len_draw_reqs,
 			}
 			r._draw_req_transforms[r._len_draw_reqs] = req.transform
 			r._len_draw_reqs += 1
@@ -442,22 +445,20 @@ draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 		draw_node(r, sub_req)
 	}
 }
-
-
-begin_draw :: proc(r: ^Renderer) {
-	map_frame_transfer_buf(r)
-	clear_lights_buf(r)
-}
-
-end_draw :: proc(r: ^Renderer) {
+upload_draws :: proc(r: ^Renderer) {
 	sort_draw_call_reqs(r)
+
+	map_frame_transfer_buf(r)
 	copy_draw_call_reqs(r)
+	copy_lights(r)
 	unmap_frame_transfer_buf(r)
+
 	start_copy_pass(r)
 	upload_transform_buf(r)
 	upload_lights_buf(r)
 	upload_draw_call_buf(r)
 	end_copy_pass(r)
+	r._len_draw_reqs = 0
 }
 
 @(private)
@@ -465,18 +466,12 @@ sort_draw_call_reqs :: proc(r: ^Renderer) {
 	slice.sort_by_cmp(
 		r._draw_call_reqs[:r._len_draw_reqs],
 		proc(i, j: Draw_Call_Req) -> (ordering: slice.Ordering) {
-			model_ordering := slice.cmp(i.model_idx, j.model_idx)
-			switch model_ordering {
-			case .Less, .Greater:
-				ordering = model_ordering
-			case .Equal:
-				ordering_primitive := slice.cmp(i.primitive_idx, j.primitive_idx)
-				switch ordering_primitive {
-				case .Less, .Greater:
-					ordering = ordering_primitive
-				case .Equal:
-					ordering = slice.cmp(i.transform_idx, j.transform_idx)
-				}
+			orderings_lt := simd.to_array(simd.lanes_lt(i, j))
+			orderings_gt := simd.to_array(simd.lanes_gt(i, j))
+			#unroll for idx in Draw_Call_Sort_Idx {
+				idx_ordering: slice.Ordering = cast(bool)orderings_lt[idx] ? .Less : .Equal
+				idx_ordering = cast(bool)orderings_gt[idx] ? .Greater : idx_ordering
+				ordering = ordering == .Equal ? idx_ordering : ordering
 			}
 			return
 		},
@@ -487,12 +482,12 @@ sort_draw_call_reqs :: proc(r: ^Renderer) {
 bind_model :: #force_inline proc(r: ^Renderer, model_idx: glist.Glist_Idx) {
 	model := glist.get(r.models, model_idx)
 	sdl.BindGPUVertexBuffers(
-		r._draw_render_pass,
+		r._render_pass,
 		0,
 		cast([^]sdl.GPUBufferBinding)&model.vert_bufs,
 		len(model.vert_bufs),
 	)
-	sdl.BindGPUIndexBuffer(r._draw_render_pass, model.index_buf, ._16BIT)
+	sdl.BindGPUIndexBuffer(r._render_pass, model.index_buf, ._16BIT)
 }
 
 @(private)
@@ -503,9 +498,9 @@ bind_material :: #force_inline proc(r: ^Renderer, model_idx: glist.Glist_Idx, ma
 		normal_scale = material.normal_scale,
 		ao_strength  = material.ao_strength,
 	}
-	sdl.PushGPUFragmentUniformData(r._draw_cmd_buf, 1, &(draw_ubo), size_of(Frag_Draw_UBO))
+	sdl.PushGPUFragmentUniformData(r._render_cmd_buf, 1, &(draw_ubo), size_of(Frag_Draw_UBO))
 	sdl.BindGPUFragmentSamplers(
-		r._draw_render_pass,
+		r._render_pass,
 		0,
 		cast([^]sdl.GPUTextureSamplerBinding)&material.bindings,
 		len(material.bindings),
@@ -514,13 +509,57 @@ bind_material :: #force_inline proc(r: ^Renderer, model_idx: glist.Glist_Idx, ma
 
 @(private)
 copy_draw_call_reqs :: proc(r: ^Renderer) {
+	// copies transforms and indirect draw calls to frame mem
 	if r._len_draw_reqs == 0 do return
 
-	last_req := r._draw_call_reqs[0]
-	bind_model(r, last_req.model_idx) // TODO wait this is all wrong, we aint doin PBR yet
-	for req in r._draw_call_reqs[1:r._len_draw_reqs] {
+	last_req := simd.to_array(r._draw_call_reqs[0])
+	num_instances: u32 = 1
+	first_instance: u32 = 0
+	transform_mem := &r._frame_transfer_mem.transform.ms
+	draw_cal_mem := &r._frame_transfer_mem.draw_calls
+	for req, i in r._draw_call_reqs[1:r._len_draw_reqs] {
+		array_req := simd.to_array(req)
+		transform_mem[i] = r._draw_req_transforms[array_req[Draw_Call_Sort_Idx.TRANSFORM_IDX]]
 
+		model_idx := array_req[Draw_Call_Sort_Idx.MODEL_IDX]
+		primitive_idx := array_req[Draw_Call_Sort_Idx.PRIMITIVE_IDX]
+		last_model_idx := last_req[Draw_Call_Sort_Idx.MODEL_IDX]
+		last_primitive_idx := last_req[Draw_Call_Sort_Idx.PRIMITIVE_IDX]
+		last_req = array_req
+		if model_idx == last_model_idx && primitive_idx == last_primitive_idx do continue
+		model := glist.get(r.models, last_model_idx)
+		primitive := model.primitives[last_primitive_idx]
+		draw_cal_mem[r._len_draw_indirect_buf] = sdl.GPUIndexedIndirectDrawCommand {
+			num_indices    = primitive.num_indices,
+			num_instances  = num_instances,
+			first_index    = primitive.indices_offset,
+			vertex_offset  = primitive.vert_offset,
+			first_instance = first_instance,
+		}
+		num_instances = 1
+		first_instance = u32(i)
 	}
+
+	// get stragglers
+	last_model_idx := last_req[Draw_Call_Sort_Idx.MODEL_IDX]
+	last_primitive_idx := last_req[Draw_Call_Sort_Idx.PRIMITIVE_IDX]
+	model := glist.get(r.models, last_model_idx)
+	primitive := model.primitives[last_primitive_idx]
+	draw_cal_mem[r._len_draw_indirect_buf] = sdl.GPUIndexedIndirectDrawCommand {
+		num_indices    = primitive.num_indices,
+		num_instances  = num_instances,
+		first_index    = primitive.indices_offset,
+		vertex_offset  = primitive.vert_offset,
+		first_instance = first_instance,
+	}
+}
+
+@(private)
+copy_lights :: proc(r: ^Renderer) {
+	lights_gpu := &r._frame_transfer_mem.lights
+	lights_gpu^ = r._lights_cpu // that was easy!
+	mem.zero_item(&r._lights_cpu.num_light)
+	return
 }
 
 @(private)
@@ -557,9 +596,9 @@ upload_draw_call_buf :: proc(r: ^Renderer) {
 @(private)
 upload_transform_buf :: proc(r: ^Renderer) {
 	transfer_offset :: u32(offset_of(Frame_Transfer_Mem, transform))
-	if r._transforms_rendered == 0 do return
+	if r._len_draw_reqs == 0 do return
 	// log.infof("transforms_rendered=%d", r._transforms_rendered)
-	transforms_size := size_of(matrix[4, 4]f32) * r._transforms_rendered
+	transforms_size := size_of(matrix[4, 4]f32) * r._len_draw_reqs
 
 	sdl.UploadToGPUBuffer(
 		r._copy_pass,
@@ -567,13 +606,8 @@ upload_transform_buf :: proc(r: ^Renderer) {
 		{buffer = r._transform_gpu_buf, size = transforms_size},
 		true,
 	)
-	r._transforms_rendered = 0
 }
 
-@(private)
-clear_lights_buf :: proc(r: ^Renderer) {
-	mem.zero_item(&r._frame_transfer_mem.lights.num_light)
-}
 
 @(private)
 upload_lights_buf :: proc(r: ^Renderer) {
@@ -588,14 +622,18 @@ upload_lights_buf :: proc(r: ^Renderer) {
 	)
 }
 
-begin_screen_render :: proc(r: ^Renderer) {
-	assert(r._draw_render_pass == nil)
-	assert(r._draw_cmd_buf == nil)
-	r._draw_cmd_buf = sdl.AcquireGPUCommandBuffer(r._gpu);sdle.err(r._draw_cmd_buf)
+begin_render :: proc(r: ^Renderer) {
+	assert(r._render_cmd_buf == nil)
+	r._render_cmd_buf = sdl.AcquireGPUCommandBuffer(r._gpu);sdle.err(r._render_cmd_buf)
+}
 
+begin_screen_render_pass :: proc(r: ^Renderer) {
+	if r._render_pass != nil {
+		sdl.EndGPURenderPass(r._render_pass)
+	}
 	swapchain_tex: ^sdl.GPUTexture
 	ok := sdl.WaitAndAcquireGPUSwapchainTexture(
-		r._draw_cmd_buf,
+		r._render_cmd_buf,
 		r._window,
 		&swapchain_tex,
 		nil,
@@ -615,42 +653,43 @@ begin_screen_render :: proc(r: ^Renderer) {
 		clear_depth = 1,
 		store_op    = .DONT_CARE,
 	}
-	r._draw_render_pass = sdl.BeginGPURenderPass(
-		r._draw_cmd_buf,
+	r._render_pass = sdl.BeginGPURenderPass(
+		r._render_cmd_buf,
 		&color_target,
 		1,
 		&depth_target_info,
 	)
 }
 
+shadow_pass :: proc(r: ^Renderer) {
+	//TODO
+}
+
 opaque_pass :: proc(r: ^Renderer) {
-	sdl.BindGPUGraphicsPipeline(r._draw_render_pass, r._pbr_pipeline)
-	sdl.BindGPUVertexStorageBuffers(r._draw_render_pass, 0, &(r._transform_gpu_buf), 1)
-	// log.debugf("LIGHT BUFFA=%v", r._lights_gpu_buffer)
-	sdl.BindGPUFragmentStorageBuffers(r._draw_render_pass, 0, &(r._lights_gpu_buf), 1)
+	sdl.BindGPUGraphicsPipeline(r._render_pass, r._pbr_pipeline)
+	sdl.BindGPUVertexStorageBuffers(r._render_pass, 0, &(r._transform_gpu_buf), 1)
+	sdl.BindGPUFragmentStorageBuffers(r._render_pass, 0, &(r._lights_gpu_buf), 1)
 
 	view := lal.matrix4_look_at_f32(r.cam.pos, r.cam.target, [3]f32{0, 1, 0})
 	vp := r._proj_mat * view
 	r._vert_ubo = Vert_UBO {
 		vp = vp,
 	}
-	sdl.PushGPUVertexUniformData(r._draw_cmd_buf, 0, &r._vert_ubo, size_of(Vert_UBO))
+	sdl.PushGPUVertexUniformData(r._render_cmd_buf, 0, &r._vert_ubo, size_of(Vert_UBO))
 	r._frag_ubo.view_pos.xyz = r.cam.pos
 	r._frag_ubo.ambient_light_color.rgb = r.ambient_light_color
 
-	sdl.PushGPUFragmentUniformData(r._draw_cmd_buf, 0, &r._frag_ubo, size_of(Frag_Frame_UBO))
+	sdl.PushGPUFragmentUniformData(r._render_cmd_buf, 0, &r._frag_ubo, size_of(Frag_Frame_UBO))
 
-	// draw calls
+	// TODO draw calls
 }
 
-
-end_frame :: proc(r: ^Renderer) {
-	assert(r._draw_render_pass != nil)
-	assert(r._draw_cmd_buf != nil)
-
-	sdl.EndGPURenderPass(r._draw_render_pass)
-	ok := sdl.SubmitGPUCommandBuffer(r._draw_cmd_buf);sdle.err(ok)
-	r._draw_render_pass = nil
-	r._draw_cmd_buf = nil
+end_render :: proc(r: ^Renderer) {
+	assert(r._render_cmd_buf != nil)
+	assert(r._render_pass != nil)
+	sdl.EndGPURenderPass(r._render_pass)
+	ok := sdl.SubmitGPUCommandBuffer(r._render_cmd_buf);sdle.err(ok)
+	r._render_cmd_buf = nil
+	r._render_pass = nil
 }
 

@@ -62,7 +62,7 @@ Vert_Link :: struct {
 	accessor: u32,
 }
 Model_Primitive :: struct {
-	vert_offset:    u32,
+	vert_offset:    i32,
 	indices_offset: u32,
 	num_indices:    u32,
 	material:       u32,
@@ -546,7 +546,7 @@ load_gltf :: proc(
 					copy_accessor(transfer_mem[vert_offset:], data, vert_accessor)
 				}
 				pos_accessor := data.accessors[attrs[Vert_Idx.POS]]
-				model_primitive.vert_offset = vert_counter
+				model_primitive.vert_offset = i32(vert_counter)
 				vert_counter += pos_accessor.count
 
 				model.primitives[primitive_offset] = model_primitive
