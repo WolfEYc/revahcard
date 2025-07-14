@@ -16,18 +16,23 @@ layout(location=3) in vec2 uv;
 layout(location=4) in vec2 uv1;
 
 layout(location=0) out vec3 out_pos;
-layout(location=1) out vec3 out_normal;
-layout(location=2) out vec3 out_tangent;
-layout(location=3) out vec2 out_uv;
-layout(location=4) out vec2 out_uv1;
+layout(location=1) out mat3 out_tbn;
+layout(location=2) out vec2 out_uv;
+layout(location=3) out vec2 out_uv1;
+
 
 void main() {
     mat4 m = ms[gl_InstanceIndex];
     vec4 world_pos = m * vec4(pos, 1);
     gl_Position = vp * world_pos;
     out_pos = world_pos.xyz;
+
+    vec3 N = normalize((m * vec4(normal,    0.0)).xyz);
+    vec3 T = normalize((m * vec4(tangent,   0.0)).xyz);
+    T = normalize(T - dot(T, N) * N);
+    vec3 B = cross(N, T);
+    out_tbn = mat3(T, B, N);
+
     out_uv = uv;
-    // mat4 n = ns[gl_InstanceIndex];
-    out_normal = (m * vec4(normal, 0.0)).xyz;
-    out_tangent = (m * vec4(tangent, 0.0)).xyz;
+    out_uv1 = uv1;
 }

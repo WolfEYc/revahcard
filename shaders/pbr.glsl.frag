@@ -62,24 +62,17 @@ layout(set=3, binding=1) uniform Draw_UBO {
 };
 
 layout(location=0) in vec3 in_world_pos;
-layout(location=1) in vec3 in_normal;
-layout(location=2) in vec3 in_tangent;
-layout(location=3) in vec2 in_uv;
-layout(location=4) in vec2 in_uv1;
+layout(location=1) in mat3 in_tbn;
+layout(location=2) in vec2 in_uv;
+layout(location=3) in vec2 in_uv1;
 
 layout(location=0) out vec4 out_color;
 
 vec3 calc_normal() {
-    vec3 normal = normalize(in_normal);
-    vec3 tangent = normalize(in_tangent);
-    tangent = normalize(tangent - dot(tangent, normal) * normal);
-    vec3 bitangent = cross(tangent, normal);
-    vec3 bump_map_normal = texture(normal_sampler, in_uv).xyz * 2.0 - 1.0;
-    bump_map_normal.xy *= normal_scale;
-    mat3 TBN = mat3(tangent, bitangent, normal);
-    vec3 new_normal = TBN * bump_map_normal;
-    new_normal = normalize(new_normal);
-    return new_normal;
+    vec3 normal = texture(normal_sampler, in_uv).xyz;
+    normal = normal * 2.0 - 1.0;
+    normal = normalize(in_tbn * normal); 
+    return normal;
 }
 
 vec3 fresnel(float cos_theta, vec3 F0) {

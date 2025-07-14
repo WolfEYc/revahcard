@@ -46,7 +46,6 @@ main :: proc() {
 	drag_racer_node, has_drag_racer_node :=
 		drag_racer_model.node_map["vehicle-drag-racer"];assert(has_drag_racer_node)
 	light_cube_idx, has_light_cube := r.model_map["white_light_cube.glb"];assert(has_light_cube)
-	light_cube_model := glist.get(r.models, light_cube_idx)
 	r.cam.pos.y = 1
 	r.cam.pos.z = 1
 
@@ -75,47 +74,48 @@ main :: proc() {
 		// update state
 		freecam_update(&s, r)
 
-		drag_racer_req: renderer.Draw_Node_Req
+		renderer.begin_draw(r)
 		{
-			num_instances :: 1
 			deg_per_s :: 90
 			micros_per_deg :: 1_000_000 / deg_per_s
 			degs := f64(s.ticks_ns / micros_per_deg) / 1000.0
 			rads := f32(degs * lal.RAD_PER_DEG)
 			quat := lal.quaternion_from_pitch_yaw_roll_f32(0, rads, 0)
-			transforms := make([]matrix[4, 4]f32, num_instances, context.temp_allocator)
-			transforms[0] = lal.matrix4_from_trs([3]f32{0, 0, 0}, quat, [3]f32{1, 1, 1})
-			drag_racer_req = renderer.Draw_Node_Req {
-				model      = drag_racer_model,
-				transforms = transforms,
-				node_idx   = drag_racer_node,
+			transform := lal.matrix4_from_trs([3]f32{0, 0, 0}, quat, [3]f32{1, 1, 1})
+			req := renderer.Draw_Node_Req {
+				model_idx = drag_racer_idx,
+				transform = transform,
+				node_idx  = drag_racer_node,
 			}
+			renderer.draw_node(r, req)
 		}
-		light_cube_req: renderer.Draw_Node_Req
 		{
-			num_instances :: 2
 			deg_per_s :: 90
 			micros_per_deg :: 1_000_000 / deg_per_s
 			degs := f64(s.ticks_ns / micros_per_deg) / 1000.0
 			rads := f32(degs * lal.RAD_PER_DEG)
 			quat := lal.quaternion_from_pitch_yaw_roll_f32(0, rads, 0)
-			transforms := make([]matrix[4, 4]f32, num_instances, context.temp_allocator)
-			transforms[0] = lal.matrix4_from_trs([3]f32{1, 0.7, 0}, quat, [3]f32{1, 1, 1})
-			transforms[1] = lal.matrix4_from_trs([3]f32{-1, 0.7, 0}, quat, [3]f32{1, 1, 1})
-			light_cube_req = renderer.Draw_Node_Req {
-				model      = light_cube_model,
-				transforms = transforms,
-				node_idx   = 1,
+			transform1 := lal.matrix4_from_trs([3]f32{1, 0.7, 0}, quat, [3]f32{1, 1, 1})
+			transform2 := lal.matrix4_from_trs([3]f32{-1, 0.7, 0}, quat, [3]f32{1, 1, 1})
+			req1 := renderer.Draw_Node_Req {
+				model_idx = light_cube_idx,
+				transform = transform1,
+				node_idx  = 1,
 			}
+			req2 := renderer.Draw_Node_Req {
+				model_idx = light_cube_idx,
+				transform = transform2,
+				node_idx  = 1,
+			}
+			renderer.draw_node(r, req1)
+			renderer.draw_node(r, req2)
 		}
-		// render
-		renderer.begin_frame(r)
-		renderer.pbr_pass(r)
-		// draw sh*t
-		renderer.draw_node(r, drag_racer_req)
-		renderer.draw_node(r, light_cube_req)
+		renderer.end_draw(r)
 
-		renderer.end_frame(r)
+		renderer.begin_render(r)
+		renderer.begin_screen_render_pass(r)
+		renderer.opaque_pass(r)
+		renderer.end_render(r)
 	}
 }
 

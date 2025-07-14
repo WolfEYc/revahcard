@@ -56,6 +56,17 @@ Vert_Sizes := [Vert_Idx]u32 {
 	.POS ..= .TANGENT = size_of([3]f32),
 	.UV ..= .UV1 = size_of([2]f32),
 }
+
+@(private)
+calc_vert_size :: proc() -> (size: u32) {
+	for attr_size in Vert_Sizes {
+		size += attr_size
+	}
+	return
+}
+
+VERT_SIZE := calc_vert_size()
+
 // indexes to accessors
 Vert_Link :: struct {
 	offset:   u32,
@@ -69,9 +80,6 @@ Model_Primitive :: struct {
 }
 Model_Node :: struct {
 	mat:      matrix[4, 4]f32,
-	pos:      [3]f32,
-	scale:    [3]f32,
-	rot:      quaternion128,
 	mesh:     Maybe(u32),
 	light:    Maybe(u32),
 	children: []u32,
@@ -232,15 +240,14 @@ load_gltf :: proc(
 			switch mem in uri {
 			case string:
 				img_path := filepath.join(
-					{dist_dir, texture_dir, mem},
+					{dist_dir, model_dir, mem},
 					context.temp_allocator,
 				) or_return
 				img_path_cstr := strings.clone_to_cstring(img_path, context.temp_allocator)
 				disk_surface = sdli.Load(img_path_cstr)
 			case []byte:
 				mem_buf_view := raw_data(mem[offset:])
-				length = min(length, u32(len(mem)))
-				io_stream := sdl.IOFromMem(mem_buf_view, uint(length))
+				io_stream := sdl.IOFromMem(mem_buf_view, uint(len(mem)))
 				disk_surface = sdli.Load_IO(io_stream, true);sdle.err(disk_surface)
 			}
 			palette := sdl.GetSurfacePalette(disk_surface)
@@ -481,10 +488,9 @@ load_gltf :: proc(
 				num_primitives += 1
 			}
 		}
-		vert_size :: size_of([3]f32) * 3 + size_of([2]f32) * 2
 		idxs_size := idx_counter * size_of(u16)
 
-		verts_size := vert_counter * vert_size
+		verts_size := vert_counter * VERT_SIZE
 		tbuf_size := idxs_size + verts_size
 		transfer_buf := sdl.CreateGPUTransferBuffer(
 			r._gpu,
@@ -504,16 +510,18 @@ load_gltf :: proc(
 			vert_offset += Vert_Sizes[vert_idx] * vert_counter
 		}
 
-		idx_counter = u32(0)
-		vert_counter = u32(0)
+		idx_counter = 0
+		vert_counter = 0
 		model.primitives = make([]Model_Primitive, num_primitives) or_return
-		primitive_offset := 0
+		primitive_offset: u32 = 0
 
 		for gltf_mesh, mesh_idx in data.meshes {
 			gltf_ctx.mesh_name = gltf_mesh.name.?
 			gltf_ctx.mesh_idx = mesh_idx
-			model_mesh: Model_Mesh
-			mesh_primitive_count := len(gltf_mesh.primitives)
+			model.meshes[mesh_idx] = Model_Mesh {
+				num_primitives   = u32(len(gltf_mesh.primitives)),
+				primitive_offset = primitive_offset,
+			}
 
 			for gltf_primitive, primitive_idx in gltf_mesh.primitives {
 				gltf_ctx.primitive_idx = primitive_idx
@@ -523,14 +531,15 @@ load_gltf :: proc(
 				indices_idx: u32
 				indices_idx, _ = gltf_primitive.indices.?
 				attrs: [Vert_Idx]u32
-				attrs[Vert_Idx.POS] = get_primitive_attr(gltf_ctx, gltf_primitive, "POSITION")
-				attrs[Vert_Idx.NORMAL] = get_primitive_attr(gltf_ctx, gltf_primitive, "NORMAL")
-				attrs[Vert_Idx.TANGENT] = get_primitive_attr(gltf_ctx, gltf_primitive, "TANGENT")
-				attrs[Vert_Idx.UV] = get_primitive_attr(gltf_ctx, gltf_primitive, "TEXCOORD_0")
+				attrs[.POS] = get_primitive_attr(gltf_ctx, gltf_primitive, "POSITION")
+				attrs[.NORMAL] = get_primitive_attr(gltf_ctx, gltf_primitive, "NORMAL")
+				// attrs[.TANGENT] = get_primitive_attr(gltf_ctx, gltf_primitive, "TANGENT")
+				attrs[.UV] = get_primitive_attr(gltf_ctx, gltf_primitive, "TEXCOORD_0")
 				uv1_accessor, has_uv1_accessor := gltf_primitive.attributes["TEXCOORD_1"]
-				attrs[Vert_Idx.UV1] = has_uv1_accessor ? uv1_accessor : attrs[Vert_Idx.UV]
+				attrs[.UV1] = has_uv1_accessor ? uv1_accessor : attrs[.UV]
 				model_primitive.material, ok = gltf_primitive.material.?
 				if !ok do panic_primitive_err(gltf_ctx, "material")
+
 
 				idx_offset := idx_counter * size_of(u16)
 				idx_accessor := data.accessors[indices_idx]
@@ -539,20 +548,35 @@ load_gltf :: proc(
 				model_primitive.num_indices = idx_accessor.count
 				idx_counter += idx_accessor.count
 
+				tangent_dst: [][3]f32
+				pos_dst: [][3]f32
+				uv_dst: [][2]f32
 				#unroll for vert_idx in Vert_Idx {
-					accessor_idx := attrs[vert_idx]
 					vert_offset := vert_offsets[vert_idx] + vert_counter * Vert_Sizes[vert_idx]
+					if vert_idx == .POS {
+						pos_dst = (transmute([^][3]f32)transfer_mem[vert_offset:])[:vert_counter]
+					}
+					if vert_idx == .TANGENT {
+						tangent_dst =
+						(transmute([^][3]f32)transfer_mem[vert_offset:])[:vert_counter]
+						continue
+					}
+					if vert_idx == .UV {
+						uv_dst = (transmute([^][2]f32)transfer_mem[vert_offset:])[:vert_counter]
+					}
+					accessor_idx := attrs[vert_idx]
 					vert_accessor := data.accessors[accessor_idx]
 					copy_accessor(transfer_mem[vert_offset:], data, vert_accessor)
 				}
-				pos_accessor := data.accessors[attrs[Vert_Idx.POS]]
+				idxs_dst := (transmute([^]u16)transfer_mem[idx_offset:])[:idx_accessor.count]
+				generate_tangents(tangent_dst, idxs_dst, pos_dst, uv_dst)
+				pos_accessor := data.accessors[attrs[.POS]]
 				model_primitive.vert_offset = i32(vert_counter)
 				vert_counter += pos_accessor.count
 
 				model.primitives[primitive_offset] = model_primitive
 				primitive_offset += 1
 			}
-			model.meshes[mesh_idx] = model_mesh
 		}
 		sdl.UnmapGPUTransferBuffer(r._gpu, transfer_buf)
 
@@ -602,11 +626,16 @@ load_gltf :: proc(
 			}
 		}
 		// node meshes
+		if gltf_node.mat == lal.MATRIX4F32_IDENTITY {
+			node.mat = lal.matrix4_from_trs(
+				gltf_node.translation,
+				gltf_node.rotation,
+				gltf_node.scale,
+			)
+		} else {
+			node.mat = gltf_node.mat
+		}
 		node.mesh = gltf_node.mesh
-		node.mat = gltf_node.mat
-		node.pos = gltf_node.translation
-		node.scale = gltf_node.scale
-		node.rot = gltf_node.rotation
 		node.children = slice.clone(gltf_node.children)
 		// log.infof("node %d has children %v", i, node.children)
 		model.nodes[i] = node
@@ -620,5 +649,33 @@ load_gltf :: proc(
 	model_idx = glist.insert(&r.models, model) or_return
 	r.model_map[file_name] = model_idx
 	return
+}
+
+
+generate_tangents :: proc(dst: [][3]f32, idxs: []u16, pos: [][3]f32, uvs: [][2]f32) {
+	for i := 0; i < len(idxs); i += 3 {
+		idx1 := idxs[i]
+		idx2 := idxs[i + 1]
+		idx3 := idxs[i + 2]
+
+		pos1 := pos[idx1]
+		pos2 := pos[idx2]
+		pos3 := pos[idx3]
+
+		uv1 := uvs[idx1]
+		uv2 := uvs[idx2]
+		uv3 := uvs[idx3]
+
+		edge1 := pos2 - pos1
+		edge2 := pos3 - pos1
+		delta_uv1 := uv2 - uv1
+		delta_uv2 := uv3 - uv1
+
+		f := 1.0 / (delta_uv1.x * delta_uv2.y - delta_uv2.x * delta_uv1.y)
+		tangent := delta_uv2.y * edge1 - delta_uv1.y * edge2
+		dst[idx1] = tangent
+		dst[idx2] = tangent
+		dst[idx3] = tangent
+	}
 }
 
