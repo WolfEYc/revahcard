@@ -61,18 +61,49 @@ layout(set=3, binding=1) uniform Draw_UBO {
     float ao_strength;
 };
 
+struct BRDF_Args {
+    vec3 F0;
+    vec3 radiance;
+    vec3 dir_to_light;
+    vec3 dir_to_cam;
+    vec3 diffuse;
+    vec3 normal;
+    float metallic;
+    float roughness;
+} brdf_args;
+
 layout(location=0) in vec3 in_world_pos;
-layout(location=1) in mat3 in_tbn;
+layout(location=1) in vec3 in_normal;
 layout(location=2) in vec2 in_uv;
 layout(location=3) in vec2 in_uv1;
 
 layout(location=0) out vec4 out_color;
 
+mat3 cotangent_frame() {
+    vec3 N = normalize(in_normal);
+    vec3 p = -brdf_args.dir_to_cam;
+    // get pixel triange edges
+    vec3 dp1 = dFdx(p);
+    vec3 dp2 = dFdy(p);
+    vec2 duv1 = dFdx(in_uv);
+    vec2 duv2 = dFdy(in_uv);
+
+    // solve the linear system
+    vec3 dp2perp = cross(dp2, N);
+    vec3 dp1perp = cross(N, dp1);
+    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+
+    // construct a scale-invariant frame
+    float invmax = inversesqrt(max(max(dot(T,T), dot(B, B)), 1e-8));
+    return mat3(T * invmax, B * invmax, N);
+}
+
 vec3 calc_normal() {
-    vec3 normal = texture(normal_sampler, in_uv).xyz;
-    normal = normal * 2.0 - 1.0;
-    normal = normalize(in_tbn * normal); 
-    return normal;
+    vec3 map = texture(normal_sampler, in_uv).xyz;
+    map = map * 2.0 - 1.0;
+    mat3 TBN = cotangent_frame();
+    return normalize(TBN * map);
 }
 
 vec3 fresnel(float cos_theta, vec3 F0) {
@@ -105,16 +136,6 @@ float geometry_smith(float normal_dot_view, float normal_dot_light, float roughn
     return ggx1 * ggx2;
 }
 
-struct BRDF_Args {
-    vec3 F0;
-    vec3 radiance;
-    vec3 dir_to_light;
-    vec3 dir_to_cam;
-    vec3 diffuse;
-    vec3 normal;
-    float metallic;
-    float roughness;
-} brdf_args;
 
 vec3 brdf()  {
     vec3 halfway = normalize(brdf_args.dir_to_light + brdf_args.dir_to_cam);
@@ -135,6 +156,7 @@ vec3 brdf()  {
 }
 
 void main() {
+    brdf_args.dir_to_cam = normalize(cam_world_pos.xyz - in_world_pos);
     brdf_args.diffuse = texture(diffuse_sampler, in_uv).rgb;
     vec3 emissive = texture(emissive_sampler, in_uv).rgb;
     brdf_args.normal = calc_normal();
@@ -144,7 +166,6 @@ void main() {
     float ao = texture(ao_sampler, in_uv1).r;
     ao = mix(1.0, ao, ao_strength);
 
-    brdf_args.dir_to_cam = normalize(cam_world_pos.xyz - in_world_pos);
     brdf_args.F0 = mix(vec3(0.04), brdf_args.diffuse, brdf_args.metallic); // surface reflection at 0 incidence
 
     vec3 color = vec3(0.0);

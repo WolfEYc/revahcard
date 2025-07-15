@@ -5,6 +5,7 @@ import "../lib/pool"
 import "../lib/sdle"
 import "base:runtime"
 import "core:encoding/json"
+import "core:fmt"
 import "core:log"
 import lal "core:math/linalg"
 import "core:mem"
@@ -47,13 +48,12 @@ Model_Mesh :: struct {
 Vert_Idx :: enum {
 	POS,
 	NORMAL,
-	TANGENT,
 	UV,
 	UV1,
 }
 @(rodata)
 Vert_Sizes := [Vert_Idx]u32 {
-	.POS ..= .TANGENT = size_of([3]f32),
+	.POS ..= .NORMAL = size_of([3]f32),
 	.UV ..= .UV1 = size_of([2]f32),
 }
 
@@ -464,8 +464,8 @@ load_gltf :: proc(
 	}
 
 	meshes: {
-		vert_counter := u32(0)
-		idx_counter := u32(0)
+		vert_counter: u32 = 0
+		idx_counter: u32 = 0
 		num_primitives := 0
 
 		for gltf_mesh, mesh_idx in data.meshes {
@@ -491,11 +491,22 @@ load_gltf :: proc(
 		idxs_size := idx_counter * size_of(u16)
 
 		verts_size := vert_counter * VERT_SIZE
+		// log.infof("fart=%d", verts_size)
+		// assert(1 == 2)
 		tbuf_size := idxs_size + verts_size
+		props := sdl.CreateProperties();sdle.err(props)
+		defer sdl.DestroyProperties(props)
+		tbuf_name := fmt.ctprintf("%s_transfer_buf", file_name)
+		ok := sdl.SetStringProperty(
+			props,
+			sdl.PROP_GPU_TRANSFERBUFFER_CREATE_NAME_STRING,
+			tbuf_name,
+		);sdle.err(ok)
 		transfer_buf := sdl.CreateGPUTransferBuffer(
 			r._gpu,
-			{usage = .UPLOAD, size = tbuf_size},
+			{usage = .UPLOAD, size = tbuf_size, props = props},
 		);sdle.err(transfer_buf)
+		defer sdl.ReleaseGPUTransferBuffer(r._gpu, transfer_buf)
 
 		transfer_mem := transmute([^]byte)sdl.MapGPUTransferBuffer(
 			r._gpu,
@@ -548,28 +559,12 @@ load_gltf :: proc(
 				model_primitive.num_indices = idx_accessor.count
 				idx_counter += idx_accessor.count
 
-				tangent_dst: [][3]f32
-				pos_dst: [][3]f32
-				uv_dst: [][2]f32
 				#unroll for vert_idx in Vert_Idx {
 					vert_offset := vert_offsets[vert_idx] + vert_counter * Vert_Sizes[vert_idx]
-					if vert_idx == .POS {
-						pos_dst = (transmute([^][3]f32)transfer_mem[vert_offset:])[:vert_counter]
-					}
-					if vert_idx == .TANGENT {
-						tangent_dst =
-						(transmute([^][3]f32)transfer_mem[vert_offset:])[:vert_counter]
-						continue
-					}
-					if vert_idx == .UV {
-						uv_dst = (transmute([^][2]f32)transfer_mem[vert_offset:])[:vert_counter]
-					}
 					accessor_idx := attrs[vert_idx]
 					vert_accessor := data.accessors[accessor_idx]
 					copy_accessor(transfer_mem[vert_offset:], data, vert_accessor)
 				}
-				idxs_dst := (transmute([^]u16)transfer_mem[idx_offset:])[:idx_accessor.count]
-				generate_tangents(tangent_dst, idxs_dst, pos_dst, uv_dst)
 				pos_accessor := data.accessors[attrs[.POS]]
 				model_primitive.vert_offset = i32(vert_counter)
 				vert_counter += pos_accessor.count
@@ -580,24 +575,32 @@ load_gltf :: proc(
 		}
 		sdl.UnmapGPUTransferBuffer(r._gpu, transfer_buf)
 
-		index_buf := sdl.CreateGPUBuffer(
-			r._gpu,
-			{usage = {.INDEX}, size = idxs_size},
-		);sdle.err(index_buf)
-		sdl.UploadToGPUBuffer(
-			r._copy_pass,
-			{transfer_buffer = transfer_buf},
-			{buffer = index_buf, size = idxs_size},
-			false,
-		)
-		model.index_buf = sdl.GPUBufferBinding {
-			buffer = index_buf,
+		upload_indices: {
+			props := sdl.CreateProperties();sdle.err(props)
+			buf_name := fmt.ctprintf("%s_indices_buf", file_name)
+			sdl.SetStringProperty(props, sdl.PROP_GPU_BUFFER_CREATE_NAME_STRING, buf_name)
+			index_buf := sdl.CreateGPUBuffer(
+				r._gpu,
+				{usage = {.INDEX}, size = idxs_size, props = props},
+			);sdle.err(index_buf)
+			sdl.UploadToGPUBuffer(
+				r._copy_pass,
+				{transfer_buffer = transfer_buf},
+				{buffer = index_buf, size = idxs_size},
+				false,
+			)
+			model.index_buf = sdl.GPUBufferBinding {
+				buffer = index_buf,
+			}
 		}
 		#unroll for vert_idx in Vert_Idx {
+			props := sdl.CreateProperties();sdle.err(props)
+			buf_name := fmt.ctprintf("%s_%v_buf", file_name, vert_idx)
+			sdl.SetStringProperty(props, sdl.PROP_GPU_BUFFER_CREATE_NAME_STRING, buf_name)
 			size := vert_counter * Vert_Sizes[vert_idx]
 			vert_buf := sdl.CreateGPUBuffer(
 				r._gpu,
-				{usage = {.VERTEX}, size = size},
+				{usage = {.VERTEX}, size = size, props = props},
 			);sdle.err(vert_buf)
 			sdl.UploadToGPUBuffer(
 				r._copy_pass,
@@ -605,12 +608,10 @@ load_gltf :: proc(
 				{buffer = vert_buf, size = size},
 				false,
 			)
-
 			model.vert_bufs[vert_idx] = sdl.GPUBufferBinding {
 				buffer = vert_buf,
 			}
 		}
-		sdl.ReleaseGPUTransferBuffer(r._gpu, transfer_buf)
 	}
 	// nodes 
 	for gltf_node, i in data.nodes {
@@ -661,10 +662,16 @@ generate_tangents :: proc(dst: [][3]f32, idxs: []u16, pos: [][3]f32, uvs: [][2]f
 		pos1 := pos[idx1]
 		pos2 := pos[idx2]
 		pos3 := pos[idx3]
+		log.infof("idx=%d pos1=%v", i, pos1)
+		log.infof("idx=%d pos2=%v", i, pos2)
+		log.infof("idx=%d pos3=%v", i, pos3)
 
 		uv1 := uvs[idx1]
 		uv2 := uvs[idx2]
 		uv3 := uvs[idx3]
+		log.infof("idx=%d uv1=%v", i, uv1)
+		log.infof("idx=%d uv2=%v", i, uv2)
+		log.infof("idx=%d uv3=%v", i, uv3)
 
 		edge1 := pos2 - pos1
 		edge2 := pos3 - pos1
@@ -672,10 +679,12 @@ generate_tangents :: proc(dst: [][3]f32, idxs: []u16, pos: [][3]f32, uvs: [][2]f
 		delta_uv2 := uv3 - uv1
 
 		f := 1.0 / (delta_uv1.x * delta_uv2.y - delta_uv2.x * delta_uv1.y)
-		tangent := delta_uv2.y * edge1 - delta_uv1.y * edge2
+		log.infof("idx=%d f=%.2f", i, f)
+		tangent := f * (delta_uv2.y * edge1 - delta_uv1.y * edge2)
 		dst[idx1] = tangent
 		dst[idx2] = tangent
 		dst[idx3] = tangent
+		log.infof("idx=%d tangent=%v", i, tangent)
 	}
 }
 
