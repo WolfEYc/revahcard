@@ -2,7 +2,7 @@
 
 layout(set=0, binding=0) readonly buffer Mvp_Buffer {
     mat4 ms[4096]; // model matrices
-    // mat4 ns[4096]; // normal matrices
+    mat4 ns[4096]; // normal matrices
 };
 
 layout(set=1, binding=0) uniform Vert_UBO {
@@ -25,7 +25,8 @@ void main() {
     vec4 world_pos = m * vec4(pos, 1.0);
     gl_Position = vp * world_pos;
     out_pos = world_pos.xyz;
-    out_normal = normalize((m * vec4(normal, 0.0)).xyz);
+    mat4 n = ns[gl_InstanceIndex];
+    out_normal = normalize((n * vec4(normal, 0.0)).xyz);
     out_uv = uv;
     out_uv1 = uv1;
 }
