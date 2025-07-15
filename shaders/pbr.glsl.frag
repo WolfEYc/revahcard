@@ -79,9 +79,8 @@ layout(location=3) in vec2 in_uv1;
 
 layout(location=0) out vec4 out_color;
 
-mat3 cotangent_frame() {
+mat3 cotangent_frame(vec3 p) {
     vec3 N = normalize(in_normal);
-    vec3 p = -brdf_args.dir_to_cam;
     // get pixel triange edges
     vec3 dp1 = dFdx(p);
     vec3 dp2 = dFdy(p);
@@ -99,10 +98,10 @@ mat3 cotangent_frame() {
     return mat3(T * invmax, B * invmax, N);
 }
 
-vec3 calc_normal() {
+vec3 calc_normal(vec3 frag_world_to_cam) {
     vec3 map = texture(normal_sampler, in_uv).xyz;
     map = map * 2.0 - 1.0;
-    mat3 TBN = cotangent_frame();
+    mat3 TBN = cotangent_frame(-frag_world_to_cam);
     return normalize(TBN * map);
 }
 
@@ -156,10 +155,11 @@ vec3 brdf()  {
 }
 
 void main() {
-    brdf_args.dir_to_cam = normalize(cam_world_pos.xyz - in_world_pos);
+    vec3 frag_world_to_cam = cam_world_pos.xyz - in_world_pos;
+    brdf_args.dir_to_cam = normalize(frag_world_to_cam);
     brdf_args.diffuse = texture(diffuse_sampler, in_uv).rgb;
     vec3 emissive = texture(emissive_sampler, in_uv).rgb;
-    brdf_args.normal = calc_normal();
+    brdf_args.normal = calc_normal(frag_world_to_cam);
     vec4 metal_rough = texture(metal_rough_sampler, in_uv);
     brdf_args.roughness = metal_rough.g;
     brdf_args.metallic = metal_rough.b;
