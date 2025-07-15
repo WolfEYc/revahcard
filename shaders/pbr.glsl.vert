@@ -1,8 +1,10 @@
 #version 460
 
+#define MAX_TRANSFORMS 4096
+
 layout(set=0, binding=0) readonly buffer Mvp_Buffer {
-    mat4 ms[4096]; // model matrices
-    mat4 ns[4096]; // normal matrices
+    mat4 ms[MAX_TRANSFORMS]; // model matrices
+    mat4 ns[MAX_TRANSFORMS]; // normal matrices
 };
 
 layout(set=1, binding=0) uniform Vert_UBO {
