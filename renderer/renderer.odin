@@ -430,6 +430,7 @@ draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 		mesh := model.meshes[mesh_idx]
 		primitive_stop := mesh.primitive_offset + mesh.num_primitives
 		for i := mesh.primitive_offset; i < primitive_stop; i += 1 {
+			if r._frame_buf_lens[.DRAW_REQ] == MAX_RENDER_NODES do return
 			primitive := model.primitives[i]
 			r._draw_call_reqs[r._frame_buf_lens[.DRAW_REQ]] = Draw_Call_Req {
 				Draw_Call_Sort_Idx.MODEL_IDX     = req.model_idx,
@@ -442,10 +443,11 @@ draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 		}
 	}
 	light, has_light := node.light.?
-	if has_light {
+	add_light: if has_light {
 		light := model.lights[light]
 		lights := &r._lights_cpu
 		num_point_light := &lights.num_light[.POINT]
+		if num_point_light == MAX_RENDER_LIGHTS do break add_light
 		lights.point_lights[num_point_light^] = GPU_Point_Light {
 			pos   = req.transform[3],
 			color = light.color,
@@ -521,7 +523,7 @@ copy_draw_call_reqs :: proc(r: ^Renderer) {
 	end_iter := r._frame_buf_lens[.DRAW_REQ]
 	for i: u32 = 1; i < end_iter; i += 1 {
 		req := r._draw_call_reqs[i]
-		array_req := transmute([Draw_Call_Sort_Idx]u32)simd.to_array(req)
+		array_req := transmute([Draw_Call_Sort_Idx]u32)req
 		model_matrices[i] = r._draw_req_transforms[array_req[.TRANSFORM_IDX]]
 		normal_matrices[i] = lal.inverse_transpose(model_matrices[i])
 
@@ -617,14 +619,22 @@ upload_draw_call_buf :: proc(r: ^Renderer) {
 @(private)
 upload_transform_buf :: proc(r: ^Renderer) {
 	transfer_offset :: u32(offset_of(Frame_Transfer_Mem, transform))
+	model_offset :: transfer_offset + u32(offset_of(Transform_Storage_Mem, ms))
+	normal_offset :: transfer_offset + u32(offset_of(Transform_Storage_Mem, ns))
 	if r._frame_buf_lens[.DRAW_REQ] == 0 do return
 	// log.infof("transforms_rendered=%d", r._transforms_rendered)
-	transforms_size := size_of(matrix[4, 4]f32) * r._frame_buf_lens[.DRAW_REQ]
+	size := size_of(matrix[4, 4]f32) * r._frame_buf_lens[.DRAW_REQ]
 
 	sdl.UploadToGPUBuffer(
 		r._copy_pass,
-		{transfer_buffer = r._frame_transfer_buf, offset = transfer_offset},
-		{buffer = r._transform_gpu_buf, size = transforms_size},
+		{transfer_buffer = r._frame_transfer_buf, offset = model_offset},
+		{buffer = r._transform_gpu_buf, size = size},
+		true,
+	)
+	sdl.UploadToGPUBuffer(
+		r._copy_pass,
+		{transfer_buffer = r._frame_transfer_buf, offset = normal_offset},
+		{buffer = r._transform_gpu_buf, size = size},
 		true,
 	)
 }
