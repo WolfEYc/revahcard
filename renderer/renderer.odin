@@ -119,7 +119,7 @@ Frame_Transfer_Mem :: struct {
 }
 Transform_Storage_Mem :: struct #align (16) {
 	ms: [MAX_RENDER_NODES]matrix[4, 4]f32,
-	// ns: [MAX_RENDER_NODES]matrix[4, 4]f32,
+	ns: [MAX_RENDER_NODES]matrix[4, 4]f32,
 }
 
 Light_Type :: enum {
@@ -505,8 +505,10 @@ copy_draw_call_reqs :: proc(r: ^Renderer) {
 	if r._frame_buf_lens[.DRAW_REQ] == 0 do return
 
 	last_req := transmute([Draw_Call_Sort_Idx]u32)r._draw_call_reqs[0]
-	transform_mem := &r._frame_transfer_mem.transform.ms
-	transform_mem[0] = r._draw_req_transforms[last_req[.TRANSFORM_IDX]]
+	model_matrices := &r._frame_transfer_mem.transform.ms
+	normal_matrices := &r._frame_transfer_mem.transform.ns
+	model_matrices[0] = r._draw_req_transforms[last_req[.TRANSFORM_IDX]]
+	normal_matrices[0] = lal.inverse_transpose(model_matrices[0])
 	last_mat_batch := Draw_Material_Batch {
 		model_idx    = last_req[.MODEL_IDX],
 		material_idx = last_req[.MATERIAL_IDX],
@@ -520,7 +522,8 @@ copy_draw_call_reqs :: proc(r: ^Renderer) {
 	for i: u32 = 1; i < end_iter; i += 1 {
 		req := r._draw_call_reqs[i]
 		array_req := transmute([Draw_Call_Sort_Idx]u32)simd.to_array(req)
-		transform_mem[i] = r._draw_req_transforms[array_req[.TRANSFORM_IDX]]
+		model_matrices[i] = r._draw_req_transforms[array_req[.TRANSFORM_IDX]]
+		normal_matrices[i] = lal.inverse_transpose(model_matrices[i])
 
 		model_idx := array_req[.MODEL_IDX]
 		primitive_idx := array_req[.PRIMITIVE_IDX]
