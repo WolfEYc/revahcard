@@ -435,9 +435,11 @@ load_gltf :: proc(
 
 		normal, has_normal := gltf_material.normal_texture.?
 		if has_normal {
+			log.infof("mat=%d has normal tex_index=%d", i, normal.index)
 			model_material.bindings[Mat_Idx.NORMAL] = textures[normal.index]
 			model_material.normal_scale = normal.scale
 		} else {
+			log.infof("mat=%d no normal :(", i)
 			model_material.bindings[Mat_Idx.NORMAL] = r._default_normal_binding
 			model_material.normal_scale = 1.0
 		}
@@ -541,13 +543,14 @@ load_gltf :: proc(
 				ok: bool
 				indices_idx: u32
 				indices_idx, _ = gltf_primitive.indices.?
-				attrs: [Vert_Idx]u32
-				attrs[.POS] = get_primitive_attr(gltf_ctx, gltf_primitive, "POSITION")
-				attrs[.NORMAL] = get_primitive_attr(gltf_ctx, gltf_primitive, "NORMAL")
+				attrs: [Vert_Idx]i32
+				attrs[.POS] = i32(get_primitive_attr(gltf_ctx, gltf_primitive, "POSITION"))
+				attrs[.NORMAL] = i32(get_primitive_attr(gltf_ctx, gltf_primitive, "NORMAL"))
 				// attrs[.TANGENT] = get_primitive_attr(gltf_ctx, gltf_primitive, "TANGENT")
-				attrs[.UV] = get_primitive_attr(gltf_ctx, gltf_primitive, "TEXCOORD_0")
+				uv0_accessor, has_uv0_accessor := gltf_primitive.attributes["TEXCOORD_0"]
+				attrs[.UV] = has_uv0_accessor ? i32(uv0_accessor) : -1
 				uv1_accessor, has_uv1_accessor := gltf_primitive.attributes["TEXCOORD_1"]
-				attrs[.UV1] = has_uv1_accessor ? uv1_accessor : attrs[.UV]
+				attrs[.UV1] = has_uv1_accessor ? i32(uv1_accessor) : attrs[.UV]
 				model_primitive.material, ok = gltf_primitive.material.?
 				if !ok do panic_primitive_err(gltf_ctx, "material")
 
@@ -562,9 +565,12 @@ load_gltf :: proc(
 				#unroll for vert_idx in Vert_Idx {
 					vert_offset := vert_offsets[vert_idx] + vert_counter * Vert_Sizes[vert_idx]
 					accessor_idx := attrs[vert_idx]
-					vert_accessor := data.accessors[accessor_idx]
-					copy_accessor(transfer_mem[vert_offset:], data, vert_accessor)
+					if accessor_idx != -1 {
+						vert_accessor := data.accessors[accessor_idx]
+						copy_accessor(transfer_mem[vert_offset:], data, vert_accessor)
+					}
 				}
+
 				pos_accessor := data.accessors[attrs[.POS]]
 				model_primitive.vert_offset = i32(vert_counter)
 				vert_counter += pos_accessor.count

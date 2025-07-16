@@ -41,10 +41,12 @@ main :: proc() {
 	last_ticks := sdl.GetTicks()
 	s: GameState
 
-	drag_racer_idx, has_drag_racer := r.model_map["vehicle-drag-racer.glb"];assert(has_drag_racer)
+	drag_racer_idx, has_drag_racer := r.model_map["CompareNormal.glb"];assert(has_drag_racer)
 	drag_racer_model := glist.get(r.models, drag_racer_idx)
-	drag_racer_node, has_drag_racer_node :=
-		drag_racer_model.node_map["vehicle-drag-racer"];assert(has_drag_racer_node)
+
+	// log.infof("%v", drag_racer_model.node_map)
+	// drag_racer_node, has_drag_racer_node :=
+	// 	drag_racer_model.node_map["CompareNormal"];assert(has_drag_racer_node)
 	light_cube_idx, has_light_cube := r.model_map["white_light_cube.glb"];assert(has_light_cube)
 	r.cam.pos.y = 1
 	r.cam.pos.z = 1
@@ -82,12 +84,19 @@ main :: proc() {
 			rads := f32(degs * lal.RAD_PER_DEG)
 			quat := lal.quaternion_from_pitch_yaw_roll_f32(0, rads, 0)
 			transform := lal.matrix4_from_trs([3]f32{0, 0, 0}, quat, [3]f32{1, 1, 1})
+			transform2 := lal.matrix4_from_trs([3]f32{0, 1, 0}, quat, [3]f32{1, 1, 1})
 			req := renderer.Draw_Node_Req {
 				model_idx = drag_racer_idx,
 				transform = transform,
-				node_idx  = drag_racer_node,
+				node_idx  = 0,
 			}
 			renderer.draw_node(r, req)
+			req2 := renderer.Draw_Node_Req {
+				model_idx = drag_racer_idx,
+				transform = transform2,
+				node_idx  = 1,
+			}
+			renderer.draw_node(r, req2)
 		}
 		{
 			deg_per_s :: 90

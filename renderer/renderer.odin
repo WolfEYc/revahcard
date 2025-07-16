@@ -117,7 +117,7 @@ Frame_Transfer_Mem :: struct {
 	lights:     Lights_Storage_Mem,
 	draw_calls: Draw_Call_Mem,
 }
-Transform_Storage_Mem :: struct #align (16) {
+Transform_Storage_Mem :: struct #align (64) {
 	ms: [MAX_RENDER_NODES]matrix[4, 4]f32,
 	ns: [MAX_RENDER_NODES]matrix[4, 4]f32,
 }
@@ -444,10 +444,10 @@ draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 	}
 	light, has_light := node.light.?
 	add_light: if has_light {
-		light := model.lights[light]
 		lights := &r._lights_cpu
 		num_point_light := &lights.num_light[.POINT]
-		if num_point_light == MAX_RENDER_LIGHTS do break add_light
+		if num_point_light^ == MAX_RENDER_LIGHTS do break add_light
+		light := model.lights[light]
 		lights.point_lights[num_point_light^] = GPU_Point_Light {
 			pos   = req.transform[3],
 			color = light.color,
@@ -498,6 +498,7 @@ sort_draw_call_reqs :: proc(r: ^Renderer) {
 			return
 		},
 	)
+
 }
 
 
@@ -549,12 +550,12 @@ copy_draw_call_reqs :: proc(r: ^Renderer) {
 		first_instance = i
 		num_instances = 0
 
-		if model_idx == last_model_idx && primitive.material == last_mat_batch.material_idx do continue
+		if model_idx == last_model_idx && array_req[.MATERIAL_IDX] == last_mat_batch.material_idx do continue
 		r._draw_material_batch[r._frame_buf_lens[.MAT_BATCH]] = last_mat_batch
 		r._frame_buf_lens[.MAT_BATCH] += 1
 		last_mat_batch = Draw_Material_Batch {
 			model_idx    = model_idx,
-			material_idx = primitive.material,
+			material_idx = array_req[.MATERIAL_IDX],
 			offset       = r._frame_buf_lens[.INDIRECT] * size_of(sdl.GPUIndexedIndirectDrawCommand),
 			draw_count   = 0,
 		}
@@ -612,30 +613,31 @@ upload_draw_call_buf :: proc(r: ^Renderer) {
 		r._copy_pass,
 		{transfer_buffer = r._frame_transfer_buf, offset = transfer_offset},
 		{buffer = r._draw_indirect_buf, size = size},
-		true,
+		false,
 	)
 }
 
 @(private)
 upload_transform_buf :: proc(r: ^Renderer) {
 	transfer_offset :: u32(offset_of(Frame_Transfer_Mem, transform))
-	model_offset :: transfer_offset + u32(offset_of(Transform_Storage_Mem, ms))
-	normal_offset :: transfer_offset + u32(offset_of(Transform_Storage_Mem, ns))
+	model_struct_offset :: u32(offset_of(Transform_Storage_Mem, ms))
+	model_offset :: transfer_offset + model_struct_offset
+	normal_struct_offset :: u32(offset_of(Transform_Storage_Mem, ns))
+	normal_offset :: transfer_offset + normal_struct_offset
 	if r._frame_buf_lens[.DRAW_REQ] == 0 do return
-	// log.infof("transforms_rendered=%d", r._transforms_rendered)
 	size := size_of(matrix[4, 4]f32) * r._frame_buf_lens[.DRAW_REQ]
 
 	sdl.UploadToGPUBuffer(
 		r._copy_pass,
 		{transfer_buffer = r._frame_transfer_buf, offset = model_offset},
 		{buffer = r._transform_gpu_buf, size = size},
-		true,
+		false,
 	)
 	sdl.UploadToGPUBuffer(
 		r._copy_pass,
 		{transfer_buffer = r._frame_transfer_buf, offset = normal_offset},
-		{buffer = r._transform_gpu_buf, size = size},
-		true,
+		{buffer = r._transform_gpu_buf, offset = normal_struct_offset, size = size},
+		false,
 	)
 }
 
@@ -649,7 +651,7 @@ upload_lights_buf :: proc(r: ^Renderer) {
 		r._copy_pass,
 		{transfer_buffer = r._frame_transfer_buf, offset = transfer_offset},
 		{buffer = r._lights_gpu_buf, size = size},
-		true,
+		false,
 	)
 }
 
