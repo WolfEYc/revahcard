@@ -48,13 +48,15 @@ Model_Mesh :: struct {
 Vert_Idx :: enum {
 	POS,
 	NORMAL,
+	TANGENT,
 	UV,
 	UV1,
 }
 @(rodata)
 Vert_Sizes := [Vert_Idx]u32 {
-	.POS ..= .NORMAL = size_of([3]f32),
-	.UV ..= .UV1 = size_of([2]f32),
+	.POS ..= .NORMAL         = size_of([3]f32),
+	.TANGENT = size_of([4]f32),
+	.UV ..= .UV1         = size_of([2]f32),
 }
 
 @(private)
@@ -545,8 +547,10 @@ load_gltf :: proc(
 				indices_idx, _ = gltf_primitive.indices.?
 				attrs: [Vert_Idx]i32
 				attrs[.POS] = i32(get_primitive_attr(gltf_ctx, gltf_primitive, "POSITION"))
-				attrs[.NORMAL] = i32(get_primitive_attr(gltf_ctx, gltf_primitive, "NORMAL"))
-				// attrs[.TANGENT] = get_primitive_attr(gltf_ctx, gltf_primitive, "TANGENT")
+				normal_accessor, has_normal := gltf_primitive.attributes["NORMAL"]
+				attrs[.NORMAL] = has_normal ? i32(normal_accessor) : -1
+				tangent_accessor, has_tangent := gltf_primitive.attributes["TANGENT"]
+				attrs[.TANGENT] = has_tangent ? i32(tangent_accessor) : -1
 				uv0_accessor, has_uv0_accessor := gltf_primitive.attributes["TEXCOORD_0"]
 				attrs[.UV] = has_uv0_accessor ? i32(uv0_accessor) : -1
 				uv1_accessor, has_uv1_accessor := gltf_primitive.attributes["TEXCOORD_1"]
@@ -563,15 +567,40 @@ load_gltf :: proc(
 				idx_counter += idx_accessor.count
 
 				#unroll for vert_idx in Vert_Idx {
-					vert_offset := vert_offsets[vert_idx] + vert_counter * Vert_Sizes[vert_idx]
 					accessor_idx := attrs[vert_idx]
 					if accessor_idx != -1 {
+						vert_offset := vert_offsets[vert_idx] + vert_counter * Vert_Sizes[vert_idx]
 						vert_accessor := data.accessors[accessor_idx]
 						copy_accessor(transfer_mem[vert_offset:], data, vert_accessor)
 					}
 				}
-
 				pos_accessor := data.accessors[attrs[.POS]]
+				if !has_normal || !has_tangent {
+					idxs := (transmute([^]u16)transfer_mem[idx_offset:])[:idx_accessor.count]
+					pos_offset := vert_offsets[.POS] + vert_counter * Vert_Sizes[.POS]
+					pos := (transmute([^][3]f32)transfer_mem[pos_offset:])[:pos_accessor.count]
+					normal_offset := vert_offsets[.NORMAL] + vert_counter * Vert_Sizes[.NORMAL]
+					normals := (transmute([^][3]f32)transfer_mem[normal_offset:])[:pos_accessor.count]
+					if !has_normal {
+						log.infof("generating normals for mesh: %v", gltf_mesh.name)
+						generate_normals(normals, idxs, pos)
+					}
+					if !has_tangent {
+						tangent_offset :=
+							vert_offsets[.TANGENT] + vert_counter * Vert_Sizes[.TANGENT]
+						dst := (transmute([^][4]f32)transfer_mem[tangent_offset:])[:pos_accessor.count]
+						if has_uv0_accessor {
+							uv_offset := vert_offsets[.UV] + vert_counter * Vert_Sizes[.UV]
+							uvs := (transmute([^][2]f32)transfer_mem[uv_offset:])[:pos_accessor.count]
+							log.infof("generating tangents for mesh: %v", gltf_mesh.name)
+							generate_tangents(dst, idxs, pos, uvs)
+						} else {
+							log.infof("generating arbitrary tangents for mesh: %v", gltf_mesh.name)
+							generate_arbitrary_tangents(dst, normals)
+						}
+					}
+				}
+
 				model_primitive.vert_offset = i32(vert_counter)
 				vert_counter += pos_accessor.count
 
@@ -659,7 +688,7 @@ load_gltf :: proc(
 }
 
 
-generate_tangents :: proc(dst: [][3]f32, idxs: []u16, pos: [][3]f32, uvs: [][2]f32) {
+generate_tangents :: proc(dst: [][4]f32, idxs: []u16, pos: [][3]f32, uvs: [][2]f32) {
 	for i := 0; i < len(idxs); i += 3 {
 		idx1 := idxs[i]
 		idx2 := idxs[i + 1]
@@ -668,16 +697,16 @@ generate_tangents :: proc(dst: [][3]f32, idxs: []u16, pos: [][3]f32, uvs: [][2]f
 		pos1 := pos[idx1]
 		pos2 := pos[idx2]
 		pos3 := pos[idx3]
-		log.infof("idx=%d pos1=%v", i, pos1)
-		log.infof("idx=%d pos2=%v", i, pos2)
-		log.infof("idx=%d pos3=%v", i, pos3)
+		// log.infof("idx=%d pos1=%v", i, pos1)
+		// log.infof("idx=%d pos2=%v", i, pos2)
+		// log.infof("idx=%d pos3=%v", i, pos3)
 
 		uv1 := uvs[idx1]
 		uv2 := uvs[idx2]
 		uv3 := uvs[idx3]
-		log.infof("idx=%d uv1=%v", i, uv1)
-		log.infof("idx=%d uv2=%v", i, uv2)
-		log.infof("idx=%d uv3=%v", i, uv3)
+		// log.infof("idx=%d uv1=%v", i, uv1)
+		// log.infof("idx=%d uv2=%v", i, uv2)
+		// log.infof("idx=%d uv3=%v", i, uv3)
 
 		edge1 := pos2 - pos1
 		edge2 := pos3 - pos1
@@ -685,12 +714,58 @@ generate_tangents :: proc(dst: [][3]f32, idxs: []u16, pos: [][3]f32, uvs: [][2]f
 		delta_uv2 := uv3 - uv1
 
 		f := 1.0 / (delta_uv1.x * delta_uv2.y - delta_uv2.x * delta_uv1.y)
-		log.infof("idx=%d f=%.2f", i, f)
+		// log.infof("idx=%d f=%.2f", i, f)
 		tangent := f * (delta_uv2.y * edge1 - delta_uv1.y * edge2)
-		dst[idx1] = tangent
-		dst[idx2] = tangent
-		dst[idx3] = tangent
-		log.infof("idx=%d tangent=%v", i, tangent)
+
+		dst[idx1].xyz = tangent
+		dst[idx1].w = 1.0
+		dst[idx2].xyz = tangent
+		dst[idx2].w = 1.0
+		dst[idx3].xyz = tangent
+		dst[idx3].w = 1.0
+		// log.infof("idx=%d tangent=%v", i, tangent)
+	}
+}
+
+generate_arbitrary_tangents :: proc(dst: [][4]f32, normals: [][3]f32) {
+	for i := 0; i < len(normals); i += 1 {
+		normal := lal.normalize(normals[i])
+		arbitrary := abs(normal.y) < 0.999 ? [3]f32{0, 1, 0} : [3]f32{1, 0, 0}
+		tangent := lal.normalize(lal.cross(arbitrary, normal))
+		dst[i].xyz = tangent
+		dst[i].w = 1.0
+	}
+}
+
+// smooth shaded
+generate_normals :: proc(dst: [][3]f32, idxs: []u16, pos: [][3]f32) {
+	mem.set(raw_data(dst), 0, len(dst) * size_of([3]f32))
+
+	for i := 0; i < len(idxs); i += 3 {
+		idx1 := idxs[i]
+		idx2 := idxs[i + 1]
+		idx3 := idxs[i + 2]
+
+		pos1 := pos[idx1]
+		pos2 := pos[idx2]
+		pos3 := pos[idx3]
+		// log.infof("idx=%d pos1=%v", i, pos1)
+		// log.infof("idx=%d pos2=%v", i, pos2)
+		// log.infof("idx=%d pos3=%v", i, pos3)
+
+		// log.infof("idx=%d uv1=%v", i, uv1)
+		// log.infof("idx=%d uv2=%v", i, uv2)
+		// log.infof("idx=%d uv3=%v", i, uv3)
+
+		edge1 := pos2 - pos1
+		edge2 := pos3 - pos1
+		face_normal := lal.normalize(lal.cross(edge1, edge2))
+		dst[idx1] += face_normal
+		dst[idx2] += face_normal
+		dst[idx3] += face_normal
+	}
+	for normal, i in dst {
+		dst[i] = lal.normalize(normal)
 	}
 }
 

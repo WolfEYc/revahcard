@@ -151,14 +151,16 @@ init_pbr_pipe :: proc(r: ^Renderer) {
 	vertex_attrs := []sdl.GPUVertexAttribute {
 		{location = 0, buffer_slot = 0, format = .FLOAT3},
 		{location = 1, buffer_slot = 1, format = .FLOAT3},
-		{location = 2, buffer_slot = 2, format = .FLOAT2},
+		{location = 2, buffer_slot = 2, format = .FLOAT4},
 		{location = 3, buffer_slot = 3, format = .FLOAT2},
+		{location = 4, buffer_slot = 4, format = .FLOAT2},
 	}
 	vertex_buffer_descriptions := []sdl.GPUVertexBufferDescription {
 		{slot = 0, pitch = size_of([3]f32)},
 		{slot = 1, pitch = size_of([3]f32)},
-		{slot = 2, pitch = size_of([2]f32)},
+		{slot = 2, pitch = size_of([4]f32)},
 		{slot = 3, pitch = size_of([2]f32)},
+		{slot = 4, pitch = size_of([2]f32)},
 	}
 	r._pbr_pipeline = sdl.CreateGPUGraphicsPipeline(
 		r._gpu,
