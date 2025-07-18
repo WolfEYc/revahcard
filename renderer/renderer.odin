@@ -29,7 +29,7 @@ model_dist_dir :: dist_dir + os.Path_Separator_String + model_dir
 MAX_MODELS :: 4096
 MAX_RENDER_NODES :: 4096
 MAX_RENDER_LIGHTS :: 4
-
+MAX_SHADOW_TEX :: 6
 Renderer :: struct {
 	cam:                       Camera,
 	ambient_light_color:       [3]f32,
@@ -39,7 +39,8 @@ Renderer :: struct {
 	_gpu:                      ^sdl.GPUDevice,
 	_window:                   ^sdl.Window,
 	_pbr_pipeline:             ^sdl.GPUGraphicsPipeline,
-	_proj_mat:                 matrix[4, 4]f32,
+	_shadow_pipeline:          ^sdl.GPUGraphicsPipeline,
+	_shadow_texs:              [MAX_SHADOW_TEX]^sdl.GPUTexture,
 	_depth_tex:                ^sdl.GPUTexture,
 	// defaults
 	_defaut_sampler:           ^sdl.GPUSampler,
@@ -74,6 +75,10 @@ Frame_Buf_Len :: enum {
 Camera :: struct {
 	pos:    [3]f32,
 	target: [3]f32,
+	fovy:   f32,
+	aspect: f32,
+	near:   f32,
+	far:    f32,
 }
 
 GPU_Point_Light :: struct #align (16) {
@@ -199,23 +204,59 @@ init_pbr_pipe :: proc(r: ^Renderer) {
 	return
 }
 
-Camera_Settings :: struct {
-	fovy: f32,
-	near: f32,
-	far:  f32,
-}
+@(private)
+init_shadow_pipe :: proc(r: ^Renderer) {
+	vert_shader := load_shader(
+		r._gpu,
+		"shadow.spv.vert",
+		{uniform_buffers = 1, storage_buffers = 1},
+	)
+	frag_shader := load_shader(r._gpu, "shadow.spv.frag", {})
 
-DEFAULT_CAM_SETTINGS :: Camera_Settings {
-	fovy = 90,
-	near = 0.0001,
-	far  = 1000,
+	vertex_attrs := []sdl.GPUVertexAttribute{{location = 0, buffer_slot = 0, format = .FLOAT3}}
+	vertex_buffer_descriptions := []sdl.GPUVertexBufferDescription {
+		{slot = 0, pitch = size_of([3]f32)},
+	}
+	r._shadow_pipeline = sdl.CreateGPUGraphicsPipeline(
+		r._gpu,
+		{
+			vertex_shader = vert_shader,
+			fragment_shader = frag_shader,
+			primitive_type = .TRIANGLELIST,
+			vertex_input_state = {
+				num_vertex_buffers = u32(len(vertex_buffer_descriptions)),
+				vertex_buffer_descriptions = raw_data(vertex_buffer_descriptions),
+				num_vertex_attributes = u32(len(vertex_attrs)),
+				vertex_attributes = raw_data(vertex_attrs),
+			},
+			depth_stencil_state = {
+				enable_depth_test = true,
+				enable_depth_write = true,
+				compare_op = .LESS,
+			},
+			rasterizer_state = {
+				cull_mode = .BACK,
+				// fill_mode = .LINE,
+			},
+			target_info = {
+				num_color_targets = 1,
+				color_target_descriptions = &(sdl.GPUColorTargetDescription {
+						format = sdl.GetGPUSwapchainTextureFormat(r._gpu, r._window),
+					}),
+				has_depth_stencil_target = true,
+				depth_stencil_format = GPU_DEPTH_TEX_FMT,
+			},
+		},
+	)
+	sdl.ReleaseGPUShader(r._gpu, vert_shader)
+	sdl.ReleaseGPUShader(r._gpu, frag_shader)
+
+	return
 }
 
 init :: proc(
 	gpu: ^sdl.GPUDevice,
 	window: ^sdl.Window,
-	cam_settings := DEFAULT_CAM_SETTINGS,
-	ambient_light_color := [3]f32{0.01, 0.01, 0.01},
 ) -> (
 	r: ^Renderer,
 	err: runtime.Allocator_Error,
@@ -225,19 +266,19 @@ init :: proc(
 	r._gpu = gpu
 	r._window = window
 	ok = sdl.SetGPUSwapchainParameters(gpu, window, .SDR_LINEAR, .VSYNC);sdle.err(ok)
+
 	init_pbr_pipe(r)
+	init_shadow_pipe(r)
+
 	r.models = glist.make(Model, MAX_MODELS) or_return
 
 	// proj & view
 	win_size: [2]i32
 	ok = sdl.GetWindowSize(window, &win_size.x, &win_size.y);sdle.err(ok)
-	aspect := f32(win_size.x) / f32(win_size.y)
-	r._proj_mat = lal.matrix4_perspective_f32(
-		lal.to_radians(cam_settings.fovy),
-		aspect,
-		cam_settings.near,
-		cam_settings.far,
-	)
+	r.cam.aspect = f32(win_size.x) / f32(win_size.y)
+	r.cam.fovy = 90.0
+	r.cam.near = 0.001
+	r.cam.far = 100
 	r.cam.target = r.cam.pos
 	r.cam.target.z -= 1
 
@@ -253,6 +294,20 @@ init :: proc(
 		},
 	);sdle.err(r._depth_tex)
 
+	for i := 0; i < MAX_SHADOW_TEX; i += 1 {
+		r._shadow_texs[i] = sdl.CreateGPUTexture(
+			r._gpu,
+			{
+				format = GPU_DEPTH_TEX_FMT,
+				usage = {.DEPTH_STENCIL_TARGET},
+				width = u32(win_size.x),
+				height = u32(win_size.y),
+				layer_count_or_depth = 1,
+				num_levels = 1,
+			},
+		);sdle.err(r._shadow_texs[i])
+	}
+
 	// defaults
 	start_copy_pass(r)
 	r._defaut_sampler = sdl.CreateGPUSampler(r._gpu, {})
@@ -262,7 +317,7 @@ init :: proc(
 	r._default_emissive_binding = load_pixel(r, {0, 0, 0, 255})
 	end_copy_pass(r)
 
-	r.ambient_light_color = ambient_light_color
+	r.ambient_light_color = [3]f32{0.01, 0.01, 0.01}
 
 	// transfer buf
 	frame_buf_props := sdl.CreateProperties()
@@ -696,8 +751,37 @@ begin_screen_render_pass :: proc(r: ^Renderer) {
 	)
 }
 
-shadow_pass :: proc(r: ^Renderer) {
-	//TODO
+shadow_pass :: proc(r: ^Renderer, light_idx: u32, light_type: Light_Type) {
+	if r._frame_buf_lens[.INDIRECT] == 0 do return
+	sdl.BindGPUGraphicsPipeline(r._render_pass, r._shadow_pipeline)
+	sdl.BindGPUVertexStorageBuffers(r._render_pass, 0, &(r._transform_gpu_buf), 1)
+	proj: matrix[4, 4]f32
+	light_pos: [3]f32
+	light_target: [3]f32
+	switch light_type {
+	case .DIR:
+		light := r._lights_cpu.dir_lights[light_idx]
+		light_target = r.cam.target
+		light_pos = r.cam.target + light.dir_to_light.xyz * r.cam.far
+		proj = lal.matrix_ortho3d(-10.0, 10.0, -10.0, 10.0, r.cam.near, r.cam.far)
+	case .POINT:
+		// TODO
+		light := r._lights_cpu.point_lights[light_idx]
+	case .SPOT:
+		// TODO
+		light := r._lights_cpu.spot_lights[light_idx]
+	case .AREA:
+		//TODO
+		light := r._lights_cpu.area_lights[light_idx]
+	}
+	view := lal.matrix4_look_at_f32(light_pos, light_target, [3]f32{0, 1, 0})
+	vp := proj * view
+	vert_ubo := Vert_UBO {
+		vp = vp,
+	}
+	sdl.PushGPUVertexUniformData(r._render_cmd_buf, 0, &(vert_ubo), size_of(Vert_UBO))
+
+	// TODO do the thing!
 }
 
 opaque_pass :: proc(r: ^Renderer) {
@@ -707,7 +791,13 @@ opaque_pass :: proc(r: ^Renderer) {
 	sdl.BindGPUFragmentStorageBuffers(r._render_pass, 0, &(r._lights_gpu_buf), 1)
 
 	view := lal.matrix4_look_at_f32(r.cam.pos, r.cam.target, [3]f32{0, 1, 0})
-	vp := r._proj_mat * view
+	proj_mat := lal.matrix4_perspective_f32(
+		lal.to_radians(r.cam.fovy),
+		r.cam.aspect,
+		r.cam.near,
+		r.cam.far,
+	)
+	vp := proj_mat * view
 	vert_ubo := Vert_UBO {
 		vp = vp,
 	}
@@ -746,6 +836,7 @@ opaque_pass :: proc(r: ^Renderer) {
 		)
 	}
 }
+
 @(private)
 bind_model :: proc(r: ^Renderer, model_idx: glist.Glist_Idx) {
 	model := glist.get(r.models, model_idx)
