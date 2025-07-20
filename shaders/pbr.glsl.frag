@@ -3,12 +3,14 @@
 #define PI 3.1415926538
 
 struct Point_Light {
-    vec4 pos;
+    vec3 pos;
+    int shadow_idx;
     vec4 color;
 };
 
 struct Dir_Light {
-    vec4 dir_to_light;
+    vec3 dir_to_light;
+    int shadow_idx;
     vec4 color;
 };
 
@@ -18,7 +20,8 @@ struct Spot_Light {
     vec4 dir;
     float inner_cone_angle;
     float outer_cone_angle;
-    vec2 _pad0;
+    int shadow_idx;
+    float _pad;
 };
 
 struct Area_Light {
@@ -27,7 +30,8 @@ struct Area_Light {
     vec4 right;       // xyz = tangent vector of the rectangle, w = half-width
     vec4 up;          // xyz = bitangent vector, w = half-height
     float two_sided;  // 1.0 = light both sides, 0.0 = only front side
-    vec3 _pad;        
+    int shadow_idx;
+    vec2 _pad;   
 };
 
 
@@ -37,10 +41,11 @@ layout(set=2, binding=2) uniform sampler2D metal_rough_sampler;
 layout(set=2, binding=3) uniform sampler2D ao_sampler;
 layout(set=2, binding=4) uniform sampler2D emissive_sampler;
 
-// layout(set=2, binding=5) uniform sampler2DArrayShadow shadow_sampler; //TODO
+layout(set=2, binding=5) uniform sampler2DArrayShadow shadow_sampler;
 
 #define LIGHT_MAX 4
-layout(set=2, binding=5) readonly buffer Light_Buf {
+#define LIGHT_VPS_MAX LIGHT_MAX * 4
+layout(set=2, binding=6) readonly buffer Light_Buf {
     uint num_dir_lights;
     uint num_point_lights;
     uint num_spot_lights;
@@ -49,7 +54,9 @@ layout(set=2, binding=5) readonly buffer Light_Buf {
     Dir_Light dir_lights[LIGHT_MAX];
     Spot_Light spot_lights[LIGHT_MAX];
     Area_Light area_lights[LIGHT_MAX];
+    mat4 light_vps[LIGHT_VPS_MAX];
 };
+
 
 layout(set=3, binding=0) uniform Frame_UBO {
     vec4 cam_world_pos;

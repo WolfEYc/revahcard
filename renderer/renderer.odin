@@ -70,6 +70,7 @@ Frame_Buf_Len :: enum {
 	INDIRECT,
 	DRAW_REQ,
 	MAT_BATCH,
+	SHADOW,
 }
 
 Camera :: struct {
@@ -82,12 +83,14 @@ Camera :: struct {
 }
 
 GPU_Point_Light :: struct #align (16) {
-	pos:   [4]f32, // 16
-	color: [4]f32, // 16
+	pos:        [3]f32,
+	shadow_idx: i32,
+	color:      [4]f32,
 }
 GPU_Dir_Light :: struct #align (16) {
-	dir_to_light: [4]f32, // 16
-	color:        [4]f32, // 16
+	dir_to_light: [3]f32,
+	shadow_idx:   i32,
+	color:        [4]f32,
 }
 GPU_Spot_Light :: struct #align (16) {
 	pos:              [4]f32,
@@ -95,15 +98,17 @@ GPU_Spot_Light :: struct #align (16) {
 	dir:              [4]f32,
 	inner_cone_angle: f32,
 	outer_cone_angle: f32,
-	_pad0:            [2]f32,
+	shadow_idx:       i32,
+	_pad:             f32,
 }
 GPU_Area_Light :: struct #align (16) {
-	pos:       [4]f32, // xyz = center position, w = unused or light intensity
-	color:     [4]f32, // rgb = color, a = intensity or scale
-	right:     [4]f32, // xyz = tangent vector of the rectangle, w = half-width
-	up:        [4]f32, // xyz = bitangent vector, w = half-height
-	two_sided: f32, // 1.0 = light both sides, 0.0 = only front side
-	_pad:      [3]f32,
+	pos:        [4]f32, // xyz = center position, w = unused or light intensity
+	color:      [4]f32, // rgb = color, a = intensity or scale
+	right:      [4]f32, // xyz = tangent vector of the rectangle, w = half-width
+	up:         [4]f32, // xyz = bitangent vector, w = half-height
+	two_sided:  f32, // 1.0 = light both sides, 0.0 = only front side
+	shadow_idx: i32,
+	_pad:       [2]f32,
 }
 
 Vert_UBO :: struct {
@@ -128,18 +133,19 @@ Transform_Storage_Mem :: struct #align (64) {
 }
 
 Light_Type :: enum {
-	DIR,
 	POINT,
+	DIR,
 	SPOT,
 	AREA,
 }
 
-Lights_Storage_Mem :: struct #align (16) {
+Lights_Storage_Mem :: struct {
 	num_light:    [Light_Type]u32,
 	point_lights: [MAX_RENDER_LIGHTS]GPU_Point_Light,
 	dir_lights:   [MAX_RENDER_LIGHTS]GPU_Dir_Light,
 	spot_lights:  [MAX_RENDER_LIGHTS]GPU_Spot_Light,
 	area_lights:  [MAX_RENDER_LIGHTS]GPU_Area_Light,
+	shadow_vps:   [MAX_SHADOW_TEX]matrix[4, 4]f32,
 }
 
 GPU_DEPTH_TEX_FMT :: sdl.GPUTextureFormat.D24_UNORM
@@ -268,7 +274,7 @@ init :: proc(
 	ok = sdl.SetGPUSwapchainParameters(gpu, window, .SDR_LINEAR, .VSYNC);sdle.err(ok)
 
 	init_pbr_pipe(r)
-	init_shadow_pipe(r)
+	// init_shadow_pipe(r)
 
 	r.models = glist.make(Model, MAX_MODELS) or_return
 
@@ -282,13 +288,15 @@ init :: proc(
 	r.cam.target = r.cam.pos
 	r.cam.target.z -= 1
 
+	w_width := u32(win_size.x)
+	w_height := u32(win_size.y)
 	r._depth_tex = sdl.CreateGPUTexture(
 		r._gpu,
 		{
 			format = GPU_DEPTH_TEX_FMT,
 			usage = {.DEPTH_STENCIL_TARGET},
-			width = u32(win_size.x),
-			height = u32(win_size.y),
+			width = w_width,
+			height = w_height,
 			layer_count_or_depth = 1,
 			num_levels = 1,
 		},
@@ -300,9 +308,9 @@ init :: proc(
 			{
 				format = GPU_DEPTH_TEX_FMT,
 				usage = {.DEPTH_STENCIL_TARGET},
-				width = u32(win_size.x),
-				height = u32(win_size.y),
-				layer_count_or_depth = 1,
+				width = w_width,
+				height = w_height,
+				layer_count_or_depth = MAX_SHADOW_TEX,
 				num_levels = 1,
 			},
 		);sdle.err(r._shadow_texs[i])
@@ -499,23 +507,65 @@ draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 			r._frame_buf_lens[.DRAW_REQ] += 1
 		}
 	}
-	light, has_light := node.light.?
+	light_key, has_light := node.light.?
 	add_light: if has_light {
 		lights := &r._lights_cpu
-		num_point_light := &lights.num_light[.POINT]
-		if num_point_light^ == MAX_RENDER_LIGHTS do break add_light
-		light := model.lights[light]
-		lights.point_lights[num_point_light^] = GPU_Point_Light {
-			pos   = req.transform[3],
-			color = light.color,
+		num_light := &lights.num_light[light_key.type]
+		if num_light^ == MAX_RENDER_LIGHTS do break add_light
+		shadow_idx: i32
+		gpu_idx := num_light^
+		num_light^ += 1
+		switch light_key.type {
+		case .POINT:
+			light := model.point_lights[light_key.idx]
+			lights.point_lights[gpu_idx] = light
+			shadow_idx = light.shadow_idx
+		case .DIR:
+			light := model.dir_lights[light_key.idx]
+			lights.dir_lights[gpu_idx] = light
+			shadow_idx = light.shadow_idx
+		case .SPOT:
+			light := model.spot_lights[light_key.idx]
+			lights.spot_lights[gpu_idx] = light
+			shadow_idx = light.shadow_idx
+		case .AREA:
+			light := model.area_lights[light_key.idx]
+			lights.area_lights[gpu_idx] = light
+			shadow_idx = light.shadow_idx
 		}
-		num_point_light^ += 1
+		if shadow_idx == -1 || r._frame_buf_lens[.SHADOW] == MAX_SHADOW_TEX do break add_light
+		shadow_idx = i32(r._frame_buf_lens[.SHADOW])
+		proj: matrix[4, 4]f32
+		light_pos: [3]f32
+		light_target: [3]f32
+		switch light_key.type {
+		case .DIR:
+			lights.dir_lights[gpu_idx].shadow_idx = shadow_idx
+			light := model.dir_lights[light_key.idx]
+			light_target = r.cam.target
+			light_pos = r.cam.target + light.dir_to_light.xyz * r.cam.far
+			proj = lal.matrix_ortho3d(-10.0, 10.0, -10.0, 10.0, r.cam.near, r.cam.far)
+		case .POINT:
+			// TODO
+			lights.point_lights[gpu_idx].shadow_idx = shadow_idx
+			light := model.point_lights[light_key.idx]
+		case .SPOT:
+			// TODO
+			lights.spot_lights[gpu_idx].shadow_idx = shadow_idx
+			light := model.spot_lights[light_key.idx]
+		case .AREA:
+			//TODO
+			lights.area_lights[gpu_idx].shadow_idx = shadow_idx
+			light := model.area_lights[light_key.idx]
+		}
+		view := lal.matrix4_look_at_f32(light_pos, light_target, [3]f32{0, 1, 0})
+		vp := proj * view
+		lights.shadow_vps[shadow_idx] = vp
+		r._frame_buf_lens[.SHADOW] += 1
 	}
 	num_child := len(node.children)
 	if num_child == 0 do return
 
-	temp_mem := runtime.default_temp_allocator_temp_begin()
-	defer runtime.default_temp_allocator_temp_end(temp_mem)
 	sub_req := req
 	for i := 0; i < num_child; i += 1 {
 		child := node.children[i]
@@ -751,37 +801,28 @@ begin_screen_render_pass :: proc(r: ^Renderer) {
 	)
 }
 
-shadow_pass :: proc(r: ^Renderer, light_idx: u32, light_type: Light_Type) {
+render_shadow_depths :: proc(r: ^Renderer) {
 	if r._frame_buf_lens[.INDIRECT] == 0 do return
-	sdl.BindGPUGraphicsPipeline(r._render_pass, r._shadow_pipeline)
-	sdl.BindGPUVertexStorageBuffers(r._render_pass, 0, &(r._transform_gpu_buf), 1)
-	proj: matrix[4, 4]f32
-	light_pos: [3]f32
-	light_target: [3]f32
-	switch light_type {
-	case .DIR:
-		light := r._lights_cpu.dir_lights[light_idx]
-		light_target = r.cam.target
-		light_pos = r.cam.target + light.dir_to_light.xyz * r.cam.far
-		proj = lal.matrix_ortho3d(-10.0, 10.0, -10.0, 10.0, r.cam.near, r.cam.far)
-	case .POINT:
-		// TODO
-		light := r._lights_cpu.point_lights[light_idx]
-	case .SPOT:
-		// TODO
-		light := r._lights_cpu.spot_lights[light_idx]
-	case .AREA:
-		//TODO
-		light := r._lights_cpu.area_lights[light_idx]
+	if r._render_pass != nil {
+		sdl.EndGPURenderPass(r._render_pass)
 	}
-	view := lal.matrix4_look_at_f32(light_pos, light_target, [3]f32{0, 1, 0})
-	vp := proj * view
-	vert_ubo := Vert_UBO {
-		vp = vp,
+	lights := &r._lights_cpu
+	num_shadow_casters := r._frame_buf_lens[.SHADOW]
+	vert_ubo: Vert_UBO
+	for i: u32 = 0; i < num_shadow_casters; i += 1 {
+		depth_target_info := sdl.GPUDepthStencilTargetInfo {
+			texture     = r._shadow_texs[i],
+			load_op     = .CLEAR,
+			clear_depth = 1,
+			store_op    = .STORE,
+		}
+		r._render_pass = sdl.BeginGPURenderPass(r._render_cmd_buf, nil, 0, &depth_target_info)
+		sdl.BindGPUGraphicsPipeline(r._render_pass, r._shadow_pipeline)
+		sdl.BindGPUVertexStorageBuffers(r._render_pass, 0, &(r._transform_gpu_buf), 1)
+		vert_ubo.vp = lights.shadow_vps[i]
+		sdl.PushGPUVertexUniformData(r._render_cmd_buf, 0, &(vert_ubo), size_of(Vert_UBO))
+		//TODO bind and issue draw calls per model (not material)
 	}
-	sdl.PushGPUVertexUniformData(r._render_cmd_buf, 0, &(vert_ubo), size_of(Vert_UBO))
-
-	// TODO do the thing!
 }
 
 opaque_pass :: proc(r: ^Renderer) {

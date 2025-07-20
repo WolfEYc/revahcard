@@ -18,16 +18,19 @@ import sdli "vendor:sdl3/image"
 
 
 Model :: struct {
-	vert_bufs:  [Vert_Idx]sdl.GPUBufferBinding,
-	index_buf:  sdl.GPUBufferBinding,
-	textures:   []^sdl.GPUTexture,
-	samplers:   []^sdl.GPUSampler,
-	primitives: []Model_Primitive,
-	meshes:     []Model_Mesh,
-	nodes:      []Model_Node,
-	lights:     []Model_Light,
-	materials:  []Model_Material,
-	node_map:   map[string]u32,
+	vert_bufs:    [Vert_Idx]sdl.GPUBufferBinding,
+	index_buf:    sdl.GPUBufferBinding,
+	textures:     []^sdl.GPUTexture,
+	samplers:     []^sdl.GPUSampler,
+	primitives:   []Model_Primitive,
+	meshes:       []Model_Mesh,
+	nodes:        []Model_Node,
+	dir_lights:   []GPU_Dir_Light,
+	spot_lights:  []GPU_Spot_Light,
+	point_lights: []GPU_Point_Light,
+	area_lights:  []GPU_Area_Light,
+	materials:    []Model_Material,
+	node_map:     map[string]u32,
 }
 
 Model_Material :: struct {
@@ -80,14 +83,19 @@ Model_Primitive :: struct {
 	num_indices:    u32,
 	material:       u32,
 }
+Light_Key :: struct {
+	idx:  int,
+	type: Light_Type,
+}
 Model_Node :: struct {
 	mat:      matrix[4, 4]f32,
 	mesh:     Maybe(u32),
-	light:    Maybe(u32),
+	light:    Maybe(Light_Key),
 	children: []u32,
 }
 Model_Light :: struct {
-	color: [4]f32,
+	color:   [4]f32,
+	shadows: bool,
 }
 Mat_Idx :: enum {
 	DIFFUSE,
@@ -192,6 +200,21 @@ copy_accessor :: proc(dst: [^]byte, data: ^gltf.Data, accessor: gltf.Accessor) {
 		}
 	}
 }
+
+parse_light_type :: proc(light_type_str: string) -> (light_type: Light_Type) {
+	switch light_type_str {
+	case "point":
+		light_type = .POINT
+	case "directional":
+		light_type = .DIR
+	case "spot":
+		light_type = .SPOT
+	case "area":
+		light_type = .AREA
+	}
+	return
+}
+
 load_gltf :: proc(
 	r: ^Renderer,
 	file_name: string,
@@ -375,6 +398,7 @@ load_gltf :: proc(
 
 	//lights
 	has_lights := slice.contains(data.extensions_used, "KHR_lights_punctual")
+	light_keyer: []Light_Key
 	if has_lights {
 		lights_ext_value, has_lights_ext :=
 			data.extensions.(json.Object)["KHR_lights_punctual"];assert(has_lights_ext)
@@ -382,18 +406,27 @@ load_gltf :: proc(
 			lights_ext_value.(json.Object)["lights"];assert(has_lights_arr)
 
 		lights_arr := lights_ext_arr.(json.Array)
-		model.lights = make([]Model_Light, len(lights_arr))
+		lights_sizer: [Light_Type]int
+		light_keyer = make([]Light_Key, len(lights_arr), context.temp_allocator)
 		for json_obj_light, i in lights_arr {
 			json_light := json_obj_light.(json.Object)
-			light_type := json_light["type"].(json.String)
-			if light_type != "point" {
-				log.infof(
-					"light at index %d of type %s not supported, only point lights for now.",
-					i,
-					light_type,
-				)
-				continue
+			light_type_str := json_light["type"].(json.String)
+			light_type := parse_light_type(light_type_str)
+			light_keyer[i] = Light_Key {
+				idx  = lights_sizer[light_type],
+				type = light_type,
 			}
+			lights_sizer[light_type] += 1
+		}
+		model.point_lights = make([]GPU_Point_Light, lights_sizer[.POINT])
+		model.dir_lights = make([]GPU_Dir_Light, lights_sizer[.DIR])
+		model.spot_lights = make([]GPU_Spot_Light, lights_sizer[.SPOT])
+		model.area_lights = make([]GPU_Area_Light, lights_sizer[.AREA])
+		mem.zero_item(&lights_sizer)
+		for json_obj_light, i in lights_arr {
+			json_light := json_obj_light.(json.Object)
+			light_type_str := json_light["type"].(json.String)
+			light_type := parse_light_type(light_type_str)
 			color: [4]f32 = 1.0
 			spectral_mult :: [4]f32{3, 10, 1, 1}
 			max_lumens_per_watt :: 683.0
@@ -407,10 +440,31 @@ load_gltf :: proc(
 			spectral_sensitivity := lal.dot(color, spectral_mult) / 14.0
 			intensity_candelas := f32(json_light["intensity"].(json.Float))
 			intensity := intensity_candelas / (max_lumens_per_watt * spectral_sensitivity)
-			log.infof("light %d has base color %v", i, color)
+			// log.infof("light %d has base color %v", i, color)
 			color *= intensity
-			model.lights[i].color = color
-			log.infof("light %d has color * intensity %v", i, color)
+			switch light_type {
+			case .POINT:
+				model.point_lights[lights_sizer[.POINT]] = GPU_Point_Light {
+					color = color,
+				}
+				lights_sizer[.POINT] += 1
+			case .DIR:
+				model.dir_lights[lights_sizer[.DIR]] = GPU_Dir_Light {
+					color = color,
+				}
+				lights_sizer[.DIR] += 1
+			case .SPOT:
+				model.spot_lights[lights_sizer[.SPOT]] = GPU_Spot_Light {
+					color = color,
+				}
+				lights_sizer[.SPOT] += 1
+			case .AREA:
+				model.area_lights[lights_sizer[.AREA]] = GPU_Area_Light {
+					color = color,
+				}
+				lights_sizer[.AREA] += 1
+			}
+			// log.infof("light %d has color * intensity %v", i, color)
 		}
 	}
 
@@ -657,7 +711,8 @@ load_gltf :: proc(
 		if has_lights && has_exts {
 			lights_ext, ok := node_exts["KHR_lights_punctual"]
 			if ok {
-				node.light = u32(lights_ext.(json.Object)["light"].(json.Float))
+				light_idx := u32(lights_ext.(json.Object)["light"].(json.Float))
+				node.light = light_keyer[light_idx]
 				// log.infof("node %d has light %d", i, node.light)
 			}
 		}
