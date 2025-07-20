@@ -103,6 +103,7 @@ Mat_Idx :: enum {
 	METAL_ROUGH,
 	OCCLUSION,
 	EMISSIVE,
+	SHADOW,
 }
 
 
@@ -473,48 +474,49 @@ load_gltf :: proc(
 		model_material: Model_Material
 		model_material.name = gltf_material.name
 		base_info, has_base := gltf_material.metallic_roughness.?
+		model_material.bindings[.SHADOW] = r._shadow_binding
 		if has_base {
 			diffuse_tex, has_diffuse := base_info.base_color_texture.?
-			model_material.bindings[Mat_Idx.DIFFUSE] =
+			model_material.bindings[.DIFFUSE] =
 				has_diffuse ? textures[diffuse_tex.index] : load_pixel_f32(r, base_info.base_color_factor)
 			metal_rough, has_metal_rough := base_info.metallic_roughness_texture.?
 			if has_metal_rough {
-				model_material.bindings[Mat_Idx.METAL_ROUGH] = textures[metal_rough.index]
+				model_material.bindings[.METAL_ROUGH] = textures[metal_rough.index]
 			} else {
 				pixel := [4]f32{0, base_info.roughness_factor, base_info.metallic_factor, 1.0}
-				model_material.bindings[Mat_Idx.METAL_ROUGH] = load_pixel_f32(r, pixel)
+				model_material.bindings[.METAL_ROUGH] = load_pixel_f32(r, pixel)
 			}
 		} else {
-			model_material.bindings[Mat_Idx.DIFFUSE] = r._default_diffuse_binding
-			model_material.bindings[Mat_Idx.METAL_ROUGH] = r._default_orm_binding
+			model_material.bindings[.DIFFUSE] = r._default_diffuse_binding
+			model_material.bindings[.METAL_ROUGH] = r._default_orm_binding
 		}
 
 		normal, has_normal := gltf_material.normal_texture.?
 		if has_normal {
 			log.infof("mat=%d has normal tex_index=%d", i, normal.index)
-			model_material.bindings[Mat_Idx.NORMAL] = textures[normal.index]
+			model_material.bindings[.NORMAL] = textures[normal.index]
 			model_material.normal_scale = normal.scale
 		} else {
 			log.infof("mat=%d no normal :(", i)
-			model_material.bindings[Mat_Idx.NORMAL] = r._default_normal_binding
+			model_material.bindings[.NORMAL] = r._default_normal_binding
 			model_material.normal_scale = 1.0
 		}
 		occlusion, has_occlusion := gltf_material.occlusion_texture.?
 		if has_occlusion {
-			model_material.bindings[Mat_Idx.OCCLUSION] = textures[occlusion.index]
+			model_material.bindings[.OCCLUSION] = textures[occlusion.index]
 			model_material.ao_strength = occlusion.strength
 		} else {
-			model_material.bindings[Mat_Idx.OCCLUSION] = r._default_orm_binding
+			model_material.bindings[.OCCLUSION] = r._default_orm_binding
 			model_material.ao_strength = 1.0
 		}
 		emissive, has_emissive := gltf_material.emissive_texture.?
 		if has_emissive {
-			model_material.bindings[Mat_Idx.EMISSIVE] = textures[emissive.index]
+			model_material.bindings[.EMISSIVE] = textures[emissive.index]
 		} else {
 			pixel: [4]f32
 			pixel.rgb = gltf_material.emissive_factor
 			pixel.a = 1.0
-			model_material.bindings[Mat_Idx.EMISSIVE] = load_pixel_f32(r, pixel)
+			model_material.bindings[.EMISSIVE] = load_pixel_f32(r, pixel)
 		}
 
 

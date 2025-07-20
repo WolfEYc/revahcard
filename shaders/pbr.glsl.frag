@@ -44,7 +44,8 @@ layout(set=2, binding=4) uniform sampler2D emissive_sampler;
 layout(set=2, binding=5) uniform sampler2DArrayShadow shadow_sampler;
 
 #define LIGHT_MAX 4
-#define LIGHT_VPS_MAX LIGHT_MAX * 4
+#define SHADOW_CAST_MAX 6
+
 layout(set=2, binding=6) readonly buffer Light_Buf {
     uint num_dir_lights;
     uint num_point_lights;
@@ -54,7 +55,7 @@ layout(set=2, binding=6) readonly buffer Light_Buf {
     Dir_Light dir_lights[LIGHT_MAX];
     Spot_Light spot_lights[LIGHT_MAX];
     Area_Light area_lights[LIGHT_MAX];
-    mat4 light_vps[LIGHT_VPS_MAX];
+    mat4 shadow_vps[SHADOW_CAST_MAX];
 };
 
 

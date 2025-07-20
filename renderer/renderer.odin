@@ -40,7 +40,9 @@ Renderer :: struct {
 	_window:                   ^sdl.Window,
 	_pbr_pipeline:             ^sdl.GPUGraphicsPipeline,
 	_shadow_pipeline:          ^sdl.GPUGraphicsPipeline,
-	_shadow_texs:              [MAX_SHADOW_TEX]^sdl.GPUTexture,
+	_shadow_tex:               ^sdl.GPUTexture,
+	_shadow_binding:           sdl.GPUTextureSamplerBinding,
+	_frame_shadow_tex:         ^sdl.GPUTexture,
 	_depth_tex:                ^sdl.GPUTexture,
 	// defaults
 	_defaut_sampler:           ^sdl.GPUSampler,
@@ -63,6 +65,7 @@ Renderer :: struct {
 	_draw_call_reqs:           [MAX_RENDER_NODES]Draw_Call_Req,
 	_draw_req_transforms:      [MAX_RENDER_NODES]matrix[4, 4]f32,
 	_draw_material_batch:      [MAX_RENDER_NODES]Draw_Material_Batch,
+	_draw_model_batch:         [MAX_RENDER_NODES]Draw_Model_Batch,
 	_frame_buf_lens:           [Frame_Buf_Len]u32,
 }
 
@@ -70,6 +73,7 @@ Frame_Buf_Len :: enum {
 	INDIRECT,
 	DRAW_REQ,
 	MAT_BATCH,
+	MODEL_BATCH,
 	SHADOW,
 }
 
@@ -260,6 +264,8 @@ init_shadow_pipe :: proc(r: ^Renderer) {
 	return
 }
 
+SHADOW_TEX_DIM :: 1024
+
 init :: proc(
 	gpu: ^sdl.GPUDevice,
 	window: ^sdl.Window,
@@ -302,18 +308,40 @@ init :: proc(
 		},
 	);sdle.err(r._depth_tex)
 
-	for i := 0; i < MAX_SHADOW_TEX; i += 1 {
-		r._shadow_texs[i] = sdl.CreateGPUTexture(
-			r._gpu,
-			{
-				format = GPU_DEPTH_TEX_FMT,
-				usage = {.DEPTH_STENCIL_TARGET},
-				width = w_width,
-				height = w_height,
-				layer_count_or_depth = MAX_SHADOW_TEX,
-				num_levels = 1,
-			},
-		);sdle.err(r._shadow_texs[i])
+	r._frame_shadow_tex = sdl.CreateGPUTexture(
+		r._gpu,
+		{
+			format = GPU_DEPTH_TEX_FMT,
+			usage = {.DEPTH_STENCIL_TARGET},
+			width = SHADOW_TEX_DIM,
+			height = SHADOW_TEX_DIM,
+			layer_count_or_depth = 1,
+			num_levels = 1,
+		},
+	);sdle.err(r._frame_shadow_tex)
+	r._shadow_tex = sdl.CreateGPUTexture(
+		r._gpu,
+		{
+			format = GPU_DEPTH_TEX_FMT,
+			usage = {.DEPTH_STENCIL_TARGET},
+			width = SHADOW_TEX_DIM,
+			height = SHADOW_TEX_DIM,
+			layer_count_or_depth = MAX_SHADOW_TEX,
+			num_levels = 1,
+		},
+	);sdle.err(r._shadow_tex)
+	shadow_sampler := sdl.CreateGPUSampler(
+		r._gpu,
+		{
+			min_filter = .NEAREST,
+			mag_filter = .NEAREST,
+			address_mode_u = .REPEAT,
+			address_mode_v = .REPEAT,
+		},
+	)
+	r._shadow_binding = sdl.GPUTextureSamplerBinding {
+		texture = r._shadow_tex,
+		sampler = shadow_sampler,
 	}
 
 	// defaults
@@ -482,6 +510,11 @@ Draw_Material_Batch :: struct #align (16) {
 	offset:       u32,
 	draw_count:   u32,
 }
+Draw_Model_Batch :: struct {
+	model_idx:  glist.Glist_Idx,
+	offset:     u32,
+	draw_count: u32,
+}
 
 begin_draw :: proc(r: ^Renderer) {
 	mem.zero_item(&r._frame_buf_lens)
@@ -625,6 +658,11 @@ copy_draw_call_reqs :: proc(r: ^Renderer) {
 		offset       = 0,
 		draw_count   = 1,
 	}
+	last_model_batch := Draw_Model_Batch {
+		model_idx  = last_req[.MODEL_IDX],
+		offset     = 0,
+		draw_count = 1,
+	}
 	num_instances: u32 = 1
 	first_instance: u32 = 0
 	draw_cal_mem := &r._frame_transfer_mem.draw_calls
@@ -654,6 +692,7 @@ copy_draw_call_reqs :: proc(r: ^Renderer) {
 		}
 		r._frame_buf_lens[.INDIRECT] += 1
 		defer last_mat_batch.draw_count += 1
+		defer last_model_batch.draw_count += 1
 		first_instance = i
 		num_instances = 0
 
@@ -665,6 +704,14 @@ copy_draw_call_reqs :: proc(r: ^Renderer) {
 			material_idx = array_req[.MATERIAL_IDX],
 			offset       = r._frame_buf_lens[.INDIRECT] * size_of(sdl.GPUIndexedIndirectDrawCommand),
 			draw_count   = 0,
+		}
+		if model_idx == last_model_idx do continue
+		r._draw_model_batch[r._frame_buf_lens[.MODEL_BATCH]] = last_model_batch
+		r._frame_buf_lens[.MODEL_BATCH] += 1
+		last_model_batch = Draw_Model_Batch {
+			model_idx  = model_idx,
+			offset     = r._frame_buf_lens[.INDIRECT] * size_of(sdl.GPUIndexedIndirectDrawCommand),
+			draw_count = 0,
 		}
 	}
 
@@ -684,6 +731,8 @@ copy_draw_call_reqs :: proc(r: ^Renderer) {
 
 	r._draw_material_batch[r._frame_buf_lens[.MAT_BATCH]] = last_mat_batch
 	r._frame_buf_lens[.MAT_BATCH] += 1
+	r._draw_model_batch[r._frame_buf_lens[.MODEL_BATCH]] = last_model_batch
+	r._frame_buf_lens[.MODEL_BATCH] += 1
 }
 
 @(private)
@@ -801,27 +850,51 @@ begin_screen_render_pass :: proc(r: ^Renderer) {
 	)
 }
 
-render_shadow_depths :: proc(r: ^Renderer) {
-	if r._frame_buf_lens[.INDIRECT] == 0 do return
-	if r._render_pass != nil {
-		sdl.EndGPURenderPass(r._render_pass)
-	}
-	lights := &r._lights_cpu
+shadow_pass :: proc(r: ^Renderer) {
 	num_shadow_casters := r._frame_buf_lens[.SHADOW]
+	if num_shadow_casters == 0 do return
+
+	lights := &r._lights_cpu
 	vert_ubo: Vert_UBO
 	for i: u32 = 0; i < num_shadow_casters; i += 1 {
 		depth_target_info := sdl.GPUDepthStencilTargetInfo {
-			texture     = r._shadow_texs[i],
+			texture     = r._frame_shadow_tex,
 			load_op     = .CLEAR,
 			clear_depth = 1,
 			store_op    = .STORE,
 		}
-		r._render_pass = sdl.BeginGPURenderPass(r._render_cmd_buf, nil, 0, &depth_target_info)
-		sdl.BindGPUGraphicsPipeline(r._render_pass, r._shadow_pipeline)
-		sdl.BindGPUVertexStorageBuffers(r._render_pass, 0, &(r._transform_gpu_buf), 1)
+		render_pass := sdl.BeginGPURenderPass(
+			r._render_cmd_buf,
+			nil,
+			0,
+			&depth_target_info,
+		);sdle.err(render_pass)
+		sdl.BindGPUGraphicsPipeline(render_pass, r._shadow_pipeline)
+		sdl.BindGPUVertexStorageBuffers(render_pass, 0, &(r._transform_gpu_buf), 1)
 		vert_ubo.vp = lights.shadow_vps[i]
 		sdl.PushGPUVertexUniformData(r._render_cmd_buf, 0, &(vert_ubo), size_of(Vert_UBO))
 		//TODO bind and issue draw calls per model (not material)
+		for mod_batch in r._draw_model_batch {
+			bind_model(r, mod_batch.model_idx)
+			sdl.DrawGPUIndexedPrimitivesIndirect(
+				render_pass,
+				r._draw_indirect_buf,
+				mod_batch.offset,
+				mod_batch.draw_count,
+			)
+		}
+		sdl.EndGPURenderPass(render_pass)
+		copy_pass := sdl.BeginGPUCopyPass(r._render_cmd_buf);sdle.err(copy_pass)
+		sdl.CopyGPUTextureToTexture(
+			copy_pass,
+			{texture = r._frame_shadow_tex},
+			{texture = r._shadow_tex, layer = i},
+			SHADOW_TEX_DIM,
+			SHADOW_TEX_DIM,
+			1,
+			false,
+		)
+		sdl.EndGPUCopyPass(copy_pass)
 	}
 }
 

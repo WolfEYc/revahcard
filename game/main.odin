@@ -122,6 +122,7 @@ main :: proc() {
 		renderer.end_draw(r)
 
 		renderer.begin_render(r)
+		renderer.shadow_pass(r)
 		renderer.begin_screen_render_pass(r)
 		renderer.opaque_pass(r)
 		renderer.end_render(r)
