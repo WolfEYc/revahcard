@@ -78,6 +78,7 @@ struct BRDF_Args {
     vec3 normal;
     float metallic;
     float roughness;
+    float shadow;
 } brdf_args;
 
 layout(location=0) in vec3 in_world_pos;
@@ -124,6 +125,17 @@ float geometry_smith(float normal_dot_view, float normal_dot_light, float roughn
 }
 
 
+float shadow_mult(int shadow_idx) {
+    vec4 pos_light_space = shadow_vps[shadow_idx] * in_world_pos;
+    vec3 proj_coords = pos_light_space.xyz / pos_light_space.w;
+    proj_coords = proj_coords * 0.5 + 0.5;
+    vec4 sample_in = vec4(proj_coords.xy, float(shadow_idx), proj_coords.z)
+    float shadow = texture(shadow_sampler, sample_in);
+    bool inBounds = all(greaterThanEqual(shadowCoord.xy, vec2(0.0))) &&
+                all(lessThanEqual(shadowCoord.xy, vec2(1.0)));
+    return inBounds ? shadow : 1.0;
+}
+
 vec3 brdf()  {
     vec3 halfway = normalize(brdf_args.dir_to_light + brdf_args.dir_to_cam);
     float cos_theta = max(dot(halfway, brdf_args.dir_to_cam), 0.0);
@@ -139,7 +151,7 @@ vec3 brdf()  {
 
     vec3 kD = vec3(1.0) - F;
     kD *= 1.0 - brdf_args.metallic;
-    return (kD * brdf_args.diffuse / PI + specular) * brdf_args.radiance * normal_dot_light;
+    return (kD * brdf_args.diffuse / PI + specular) * brdf_args.radiance * normal_dot_light * shadow;
 }
 
 void main() {
@@ -162,7 +174,10 @@ void main() {
 
         brdf_args.radiance = dir_light.color.rgb;
         brdf_args.dir_to_light = dir_light.dir_to_light.xyz;
-
+        int shadow_idx = dir_light.shadow_idx;
+        if shadow_idx != -1 {
+            brdf_args.shadow = shadow_mult(shadow_idx)
+        }
         color += brdf();
     }
     for (uint i = 0; i < num_point_lights; i++) {

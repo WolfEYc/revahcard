@@ -88,7 +88,7 @@ Light_Key :: struct {
 	type: Light_Type,
 }
 Model_Node :: struct {
-	mat:      matrix[4, 4]f32,
+	mat:      mat4,
 	mesh:     Maybe(u32),
 	light:    Maybe(Light_Key),
 	children: []u32,

@@ -26,10 +26,13 @@ texture_dir :: "textures"
 model_dir :: "models"
 model_dist_dir :: dist_dir + os.Path_Separator_String + model_dir
 
+mat4 :: matrix[4, 4]f32
+
 MAX_MODELS :: 4096
 MAX_RENDER_NODES :: 4096
 MAX_RENDER_LIGHTS :: 4
 MAX_SHADOW_TEX :: 6
+
 Renderer :: struct {
 	cam:                       Camera,
 	ambient_light_color:       [3]f32,
@@ -63,7 +66,7 @@ Renderer :: struct {
 	_render_pass:              ^sdl.GPURenderPass,
 	_draw_indirect_buf:        ^sdl.GPUBuffer,
 	_draw_call_reqs:           [MAX_RENDER_NODES]Draw_Call_Req,
-	_draw_req_transforms:      [MAX_RENDER_NODES]matrix[4, 4]f32,
+	_draw_req_transforms:      [MAX_RENDER_NODES]mat4,
 	_draw_material_batch:      [MAX_RENDER_NODES]Draw_Material_Batch,
 	_draw_model_batch:         [MAX_RENDER_NODES]Draw_Model_Batch,
 	_frame_buf_lens:           [Frame_Buf_Len]u32,
@@ -116,7 +119,7 @@ GPU_Area_Light :: struct #align (16) {
 }
 
 Vert_UBO :: struct {
-	vp: matrix[4, 4]f32,
+	vp: mat4,
 }
 Frag_Frame_UBO :: struct {
 	view_pos:            [4]f32,
@@ -132,8 +135,8 @@ Frame_Transfer_Mem :: struct {
 	draw_calls: Draw_Call_Mem,
 }
 Transform_Storage_Mem :: struct #align (64) {
-	ms: [MAX_RENDER_NODES]matrix[4, 4]f32,
-	ns: [MAX_RENDER_NODES]matrix[4, 4]f32,
+	ms: [MAX_RENDER_NODES]mat4,
+	ns: [MAX_RENDER_NODES]mat4,
 }
 
 Light_Type :: enum {
@@ -149,7 +152,7 @@ Lights_Storage_Mem :: struct {
 	dir_lights:   [MAX_RENDER_LIGHTS]GPU_Dir_Light,
 	spot_lights:  [MAX_RENDER_LIGHTS]GPU_Spot_Light,
 	area_lights:  [MAX_RENDER_LIGHTS]GPU_Area_Light,
-	shadow_vps:   [MAX_SHADOW_TEX]matrix[4, 4]f32,
+	shadow_vps:   [MAX_SHADOW_TEX]mat4,
 }
 
 GPU_DEPTH_TEX_FMT :: sdl.GPUTextureFormat.D24_UNORM
@@ -335,8 +338,8 @@ init :: proc(
 		{
 			min_filter = .NEAREST,
 			mag_filter = .NEAREST,
-			address_mode_u = .REPEAT,
-			address_mode_v = .REPEAT,
+			address_mode_u = .CLAMP_TO_EDGE,
+			address_mode_v = .CLAMP_TO_EDGE,
 		},
 	)
 	r._shadow_binding = sdl.GPUTextureSamplerBinding {
@@ -502,7 +505,7 @@ Draw_Call_Req :: #simd[len(Draw_Call_Sort_Idx)]u32
 Draw_Node_Req :: struct {
 	model_idx: glist.Glist_Idx,
 	node_idx:  u32,
-	transform: matrix[4, 4]f32,
+	transform: mat4,
 }
 Draw_Material_Batch :: struct #align (16) {
 	model_idx:    glist.Glist_Idx,
@@ -568,7 +571,7 @@ draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 		}
 		if shadow_idx == -1 || r._frame_buf_lens[.SHADOW] == MAX_SHADOW_TEX do break add_light
 		shadow_idx = i32(r._frame_buf_lens[.SHADOW])
-		proj: matrix[4, 4]f32
+		proj: mat4
 		light_pos: [3]f32
 		light_target: [3]f32
 		switch light_key.type {
@@ -781,7 +784,7 @@ upload_transform_buf :: proc(r: ^Renderer) {
 	normal_struct_offset :: u32(offset_of(Transform_Storage_Mem, ns))
 	normal_offset :: transfer_offset + normal_struct_offset
 	if r._frame_buf_lens[.DRAW_REQ] == 0 do return
-	size := size_of(matrix[4, 4]f32) * r._frame_buf_lens[.DRAW_REQ]
+	size := size_of(mat4) * r._frame_buf_lens[.DRAW_REQ]
 
 	sdl.UploadToGPUBuffer(
 		r._copy_pass,
