@@ -3,14 +3,12 @@
 #define PI 3.1415926538
 
 struct Point_Light {
-    vec3 pos;
-    uint shadow_idx;
+    vec4 pos;
     vec4 color;
 };
 
 struct Dir_Light {
-    vec3 dir_to_light;
-    uint shadow_idx;
+    vec4 dir_to_light;
     vec4 color;
 };
 
@@ -20,8 +18,7 @@ struct Spot_Light {
     vec4 dir;
     float inner_cone_angle;
     float outer_cone_angle;
-    uint shadow_idx;
-    float _pad;
+    vec2 _pad;
 };
 
 struct Area_Light {
@@ -30,8 +27,7 @@ struct Area_Light {
     vec4 right;       // xyz = tangent vector of the rectangle, w = half-width
     vec4 up;          // xyz = bitangent vector, w = half-height
     float two_sided;  // 1.0 = light both sides, 0.0 = only front side
-    uint shadow_idx;
-    vec2 _pad;   
+    vec3 _pad;   
 };
 
 
@@ -41,10 +37,9 @@ layout(set=2, binding=2) uniform sampler2D metal_rough_sampler;
 layout(set=2, binding=3) uniform sampler2D ao_sampler;
 layout(set=2, binding=4) uniform sampler2D emissive_sampler;
 
-layout(set=2, binding=5) uniform sampler2DArrayShadow shadow_sampler;
+layout(set=2, binding=5) uniform sampler2DShadow shadow_sampler;
 
 #define LIGHT_MAX 4
-#define SHADOW_CAST_MAX 6
 
 layout(set=3, binding=0) uniform Frame_UBO {
     vec4 cam_world_pos;
@@ -53,11 +48,11 @@ layout(set=3, binding=0) uniform Frame_UBO {
     uint num_point_lights;
     uint num_spot_lights;
     uint num_area_lights;
-    Dir_Light dir_lights[LIGHT_MAX];
+    Dir_Light dir_light;
+    mat4 shadow_vp;
     Point_Light point_lights[LIGHT_MAX];
     Spot_Light spot_lights[LIGHT_MAX];
     Area_Light area_lights[LIGHT_MAX];
-    mat4 shadow_vps[SHADOW_CAST_MAX];
 };
 
 layout(set=3, binding=1) uniform Draw_UBO {
@@ -121,12 +116,13 @@ float geometry_smith(float normal_dot_view, float normal_dot_light, float roughn
 }
 
 
-float shadow_mult(int shadow_idx) {
-    vec4 pos_light_space = shadow_vps[shadow_idx] * vec4(in_world_pos, 1.0);
+float shadow_mult() {
+    vec4 pos_light_space = shadow_vp * vec4(in_world_pos, 1.0);
     vec3 proj_coords = pos_light_space.xyz / pos_light_space.w;
     proj_coords = proj_coords * 0.5 + 0.5;
-    vec4 sample_in = vec4(proj_coords.xy, float(shadow_idx), proj_coords.z);
-    float shadow = texture(shadow_sampler, sample_in);
+    float bias = max(0.05 * (1.0 - dot(brdf_args.normal, brdf_args.dir_to_light)), 0.005);  
+    proj_coords.z -= bias;
+    float shadow = texture(shadow_sampler, proj_coords);
     bool inBounds = all(greaterThanEqual(proj_coords.xy, vec2(0.0))) &&
                 all(lessThanEqual(proj_coords.xy, vec2(1.0)));
     return inBounds ? shadow : 1.0;
@@ -165,19 +161,13 @@ void main() {
     brdf_args.F0 = mix(vec3(0.04), brdf_args.diffuse, brdf_args.metallic); // surface reflection at 0 incidence
 
     vec3 color = vec3(0.0);
-    for (uint i = 0; i < num_dir_lights; i++) {
-        Dir_Light dir_light = dir_lights[i];
-
+    if (num_dir_lights == 1) {
         brdf_args.radiance = dir_light.color.rgb;
         brdf_args.dir_to_light = dir_light.dir_to_light.xyz;
-        int shadow_idx = dir_light.shadow_idx;
-        if (shadow_idx != -1) {
-            brdf_args.shadow = shadow_mult(shadow_idx);
-        } else {
-            brdf_args.shadow = 1.0;
-        }
+        brdf_args.shadow = shadow_mult();
         color += brdf();
     }
+    brdf_args.shadow = 1.0;
     for (uint i = 0; i < num_point_lights; i++) {
         Point_Light point_light = point_lights[i];
 
@@ -186,7 +176,6 @@ void main() {
         float attenuation = 1.0 / sqr_to_light;
         brdf_args.radiance = point_light.color.rgb * attenuation;
         brdf_args.dir_to_light = vec_to_light * inversesqrt(sqr_to_light);
-        brdf_args.shadow = 1.0;
 
         color += brdf();
     }

@@ -93,10 +93,6 @@ Model_Node :: struct {
 	light:    Maybe(Light_Key),
 	children: []u32,
 }
-Model_Light :: struct {
-	color:   [4]f32,
-	shadows: bool,
-}
 Mat_Idx :: enum {
 	DIFFUSE,
 	NORMAL,
@@ -444,25 +440,24 @@ load_gltf :: proc(
 			// log.infof("light %d has base color %v", i, color)
 			color *= intensity
 			switch light_type {
-			case .POINT:
-				model.point_lights[lights_sizer[.POINT]] = GPU_Point_Light {
-					color      = color,
-					shadow_idx = 0,
-				}
-				lights_sizer[.POINT] += 1
 			case .DIR:
 				model.dir_lights[lights_sizer[.DIR]] = GPU_Dir_Light {
 					color = color,
 				}
 				lights_sizer[.DIR] += 1
+			case .POINT:
+				model.point_lights[lights_sizer[.POINT]] = GPU_Point_Light {
+					color      = color,
+				}
+				lights_sizer[.POINT] += 1
 			case .SPOT:
 				model.spot_lights[lights_sizer[.SPOT]] = GPU_Spot_Light {
-					color = color,
+					color      = color,
 				}
 				lights_sizer[.SPOT] += 1
 			case .AREA:
 				model.area_lights[lights_sizer[.AREA]] = GPU_Area_Light {
-					color = color,
+					color      = color,
 				}
 				lights_sizer[.AREA] += 1
 			}
