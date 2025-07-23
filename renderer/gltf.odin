@@ -204,10 +204,10 @@ copy_accessor :: proc(dst: [^]byte, data: ^gltf.Data, accessor: gltf.Accessor) {
 
 parse_light_type :: proc(light_type_str: string) -> (light_type: Light_Type) {
 	switch light_type_str {
-	case "point":
-		light_type = .POINT
 	case "directional":
 		light_type = .DIR
+	case "point":
+		light_type = .POINT
 	case "spot":
 		light_type = .SPOT
 	case "area":
@@ -446,7 +446,8 @@ load_gltf :: proc(
 			switch light_type {
 			case .POINT:
 				model.point_lights[lights_sizer[.POINT]] = GPU_Point_Light {
-					color = color,
+					color      = color,
+					shadow_idx = 0,
 				}
 				lights_sizer[.POINT] += 1
 			case .DIR:

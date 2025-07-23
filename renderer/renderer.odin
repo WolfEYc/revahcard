@@ -55,15 +55,17 @@ Renderer :: struct {
 	_default_emissive_binding: sdl.GPUTextureSamplerBinding,
 
 	// frame gpu mem
+	_cam_vp:                   mat4,
+	_frustrum_corners:         Frustrum_Corners,
+	_frustrum_center:          [3]f32,
 	_copy_cmd_buf:             ^sdl.GPUCommandBuffer,
 	_copy_pass:                ^sdl.GPUCopyPass,
-	_lights_gpu_buf:           ^sdl.GPUBuffer,
-	_lights_cpu:               Lights_Storage_Mem,
 	_transform_gpu_buf:        ^sdl.GPUBuffer,
 	_frame_transfer_mem:       ^Frame_Transfer_Mem,
 	_frame_transfer_buf:       ^sdl.GPUTransferBuffer,
 	_render_cmd_buf:           ^sdl.GPUCommandBuffer,
 	_render_pass:              ^sdl.GPURenderPass,
+	_frag_frame_ubo:           Frag_Frame_UBO,
 	_draw_indirect_buf:        ^sdl.GPUBuffer,
 	_draw_call_reqs:           [MAX_RENDER_NODES]Draw_Call_Req,
 	_draw_req_transforms:      [MAX_RENDER_NODES]mat4,
@@ -89,32 +91,32 @@ Camera :: struct {
 	far:    f32,
 }
 
-GPU_Point_Light :: struct #align (16) {
+GPU_Point_Light :: struct {
 	pos:        [3]f32,
-	shadow_idx: i32,
+	shadow_idx: u32,
 	color:      [4]f32,
 }
-GPU_Dir_Light :: struct #align (16) {
+GPU_Dir_Light :: struct {
 	dir_to_light: [3]f32,
-	shadow_idx:   i32,
+	shadow_idx:   u32,
 	color:        [4]f32,
 }
-GPU_Spot_Light :: struct #align (16) {
+GPU_Spot_Light :: struct {
 	pos:              [4]f32,
 	color:            [4]f32,
 	dir:              [4]f32,
 	inner_cone_angle: f32,
 	outer_cone_angle: f32,
-	shadow_idx:       i32,
+	shadow_idx:       u32,
 	_pad:             f32,
 }
-GPU_Area_Light :: struct #align (16) {
+GPU_Area_Light :: struct {
 	pos:        [4]f32, // xyz = center position, w = unused or light intensity
 	color:      [4]f32, // rgb = color, a = intensity or scale
 	right:      [4]f32, // xyz = tangent vector of the rectangle, w = half-width
 	up:         [4]f32, // xyz = bitangent vector, w = half-height
 	two_sided:  f32, // 1.0 = light both sides, 0.0 = only front side
-	shadow_idx: i32,
+	shadow_idx: u32,
 	_pad:       [2]f32,
 }
 
@@ -124,6 +126,18 @@ Vert_UBO :: struct {
 Frag_Frame_UBO :: struct {
 	view_pos:            [4]f32,
 	ambient_light_color: [4]f32,
+	num_light:           [Light_Type]u32,
+	dir_lights:          [MAX_RENDER_LIGHTS]GPU_Dir_Light,
+	point_lights:        [MAX_RENDER_LIGHTS]GPU_Point_Light,
+	spot_lights:         [MAX_RENDER_LIGHTS]GPU_Spot_Light,
+	area_lights:         [MAX_RENDER_LIGHTS]GPU_Area_Light,
+	shadow_vps:          [MAX_SHADOW_TEX]mat4,
+}
+Light_Type :: enum {
+	DIR,
+	POINT,
+	SPOT,
+	AREA,
 }
 Frag_Draw_UBO :: struct {
 	normal_scale: f32,
@@ -131,7 +145,6 @@ Frag_Draw_UBO :: struct {
 }
 Frame_Transfer_Mem :: struct {
 	transform:  Transform_Storage_Mem,
-	lights:     Lights_Storage_Mem,
 	draw_calls: Draw_Call_Mem,
 }
 Transform_Storage_Mem :: struct #align (64) {
@@ -139,32 +152,13 @@ Transform_Storage_Mem :: struct #align (64) {
 	ns: [MAX_RENDER_NODES]mat4,
 }
 
-Light_Type :: enum {
-	POINT,
-	DIR,
-	SPOT,
-	AREA,
-}
-
-Lights_Storage_Mem :: struct {
-	num_light:    [Light_Type]u32,
-	point_lights: [MAX_RENDER_LIGHTS]GPU_Point_Light,
-	dir_lights:   [MAX_RENDER_LIGHTS]GPU_Dir_Light,
-	spot_lights:  [MAX_RENDER_LIGHTS]GPU_Spot_Light,
-	area_lights:  [MAX_RENDER_LIGHTS]GPU_Area_Light,
-	shadow_vps:   [MAX_SHADOW_TEX]mat4,
-}
 
 GPU_DEPTH_TEX_FMT :: sdl.GPUTextureFormat.D24_UNORM
 
 @(private)
 init_pbr_pipe :: proc(r: ^Renderer) {
 	vert_shader := load_shader(r._gpu, "pbr.spv.vert", {uniform_buffers = 1, storage_buffers = 1})
-	frag_shader := load_shader(
-		r._gpu,
-		"pbr.spv.frag",
-		{uniform_buffers = 2, storage_buffers = 1, samplers = 5},
-	)
+	frag_shader := load_shader(r._gpu, "pbr.spv.frag", {uniform_buffers = 2, samplers = 6})
 
 	vertex_attrs := []sdl.GPUVertexAttribute {
 		{location = 0, buffer_slot = 0, format = .FLOAT3},
@@ -181,36 +175,36 @@ init_pbr_pipe :: proc(r: ^Renderer) {
 		{slot = 4, pitch = size_of([2]f32)},
 	}
 	r._pbr_pipeline = sdl.CreateGPUGraphicsPipeline(
-		r._gpu,
-		{
-			vertex_shader = vert_shader,
-			fragment_shader = frag_shader,
-			primitive_type = .TRIANGLELIST,
-			vertex_input_state = {
-				num_vertex_buffers = u32(len(vertex_buffer_descriptions)),
-				vertex_buffer_descriptions = raw_data(vertex_buffer_descriptions),
-				num_vertex_attributes = u32(len(vertex_attrs)),
-				vertex_attributes = raw_data(vertex_attrs),
-			},
-			depth_stencil_state = {
-				enable_depth_test = true,
-				enable_depth_write = true,
-				compare_op = .LESS,
-			},
-			rasterizer_state = {
-				cull_mode = .BACK,
-				// fill_mode = .LINE,
-			},
-			target_info = {
-				num_color_targets = 1,
-				color_target_descriptions = &(sdl.GPUColorTargetDescription {
-						format = sdl.GetGPUSwapchainTextureFormat(r._gpu, r._window),
-					}),
-				has_depth_stencil_target = true,
-				depth_stencil_format = GPU_DEPTH_TEX_FMT,
-			},
+	r._gpu,
+	{
+		vertex_shader = vert_shader,
+		fragment_shader = frag_shader,
+		primitive_type = .TRIANGLELIST,
+		vertex_input_state = {
+			num_vertex_buffers = u32(len(vertex_buffer_descriptions)),
+			vertex_buffer_descriptions = raw_data(vertex_buffer_descriptions),
+			num_vertex_attributes = u32(len(vertex_attrs)),
+			vertex_attributes = raw_data(vertex_attrs),
 		},
-	)
+		depth_stencil_state = {
+			enable_depth_test = true,
+			enable_depth_write = true,
+			compare_op = .LESS,
+		},
+		rasterizer_state = {
+			cull_mode = .BACK,
+			// fill_mode = .LINE,
+		},
+		target_info = {
+			num_color_targets = 1,
+			color_target_descriptions = &(sdl.GPUColorTargetDescription {
+					format = sdl.GetGPUSwapchainTextureFormat(r._gpu, r._window),
+				}),
+			has_depth_stencil_target = true,
+			depth_stencil_format = GPU_DEPTH_TEX_FMT,
+		},
+	},
+	);sdle.err(r._pbr_pipeline)
 	sdl.ReleaseGPUShader(r._gpu, vert_shader)
 	sdl.ReleaseGPUShader(r._gpu, frag_shader)
 
@@ -252,18 +246,14 @@ init_shadow_pipe :: proc(r: ^Renderer) {
 				// fill_mode = .LINE,
 			},
 			target_info = {
-				num_color_targets = 1,
-				color_target_descriptions = &(sdl.GPUColorTargetDescription {
-						format = sdl.GetGPUSwapchainTextureFormat(r._gpu, r._window),
-					}),
+				num_color_targets = 0,
 				has_depth_stencil_target = true,
 				depth_stencil_format = GPU_DEPTH_TEX_FMT,
 			},
 		},
-	)
+	);sdle.err(r._shadow_pipeline)
 	sdl.ReleaseGPUShader(r._gpu, vert_shader)
-	sdl.ReleaseGPUShader(r._gpu, frag_shader)
-
+	// sdl.ReleaseGPUShader(r._gpu, frag_shader)
 	return
 }
 
@@ -283,7 +273,7 @@ init :: proc(
 	ok = sdl.SetGPUSwapchainParameters(gpu, window, .SDR_LINEAR, .VSYNC);sdle.err(ok)
 
 	init_pbr_pipe(r)
-	// init_shadow_pipe(r)
+	init_shadow_pipe(r)
 
 	r.models = glist.make(Model, MAX_MODELS) or_return
 
@@ -293,7 +283,7 @@ init :: proc(
 	r.cam.aspect = f32(win_size.x) / f32(win_size.y)
 	r.cam.fovy = 90.0
 	r.cam.near = 0.001
-	r.cam.far = 100
+	r.cam.far = 10
 	r.cam.target = r.cam.pos
 	r.cam.target.z -= 1
 
@@ -314,6 +304,7 @@ init :: proc(
 	r._frame_shadow_tex = sdl.CreateGPUTexture(
 		r._gpu,
 		{
+			type = .D2,
 			format = GPU_DEPTH_TEX_FMT,
 			usage = {.DEPTH_STENCIL_TARGET},
 			width = SHADOW_TEX_DIM,
@@ -325,8 +316,9 @@ init :: proc(
 	r._shadow_tex = sdl.CreateGPUTexture(
 		r._gpu,
 		{
+			type = .D2_ARRAY,
 			format = GPU_DEPTH_TEX_FMT,
-			usage = {.DEPTH_STENCIL_TARGET},
+			usage = {.SAMPLER},
 			width = SHADOW_TEX_DIM,
 			height = SHADOW_TEX_DIM,
 			layer_count_or_depth = MAX_SHADOW_TEX,
@@ -378,16 +370,6 @@ init :: proc(
 			r._gpu,
 			{usage = {.GRAPHICS_STORAGE_READ}, size = size, props = props},
 		);sdle.err(r._transform_gpu_buf)
-	}
-
-	lights_buf: {
-		size :: u32(size_of(Lights_Storage_Mem))
-		props := sdl.CreateProperties()
-		sdl.SetStringProperty(props, sdl.PROP_GPU_BUFFER_CREATE_NAME_STRING, "light_buf")
-		r._lights_gpu_buf = sdl.CreateGPUBuffer(
-			r._gpu,
-			{usage = {.GRAPHICS_STORAGE_READ}, size = size, props = props},
-		);sdle.err(r._lights_gpu_buf)
 	}
 
 	draw_indirect_buf: {
@@ -521,6 +503,17 @@ Draw_Model_Batch :: struct {
 
 begin_draw :: proc(r: ^Renderer) {
 	mem.zero_item(&r._frame_buf_lens)
+	mem.zero_item(&r._frag_frame_ubo)
+	view := lal.matrix4_look_at_f32(r.cam.pos, r.cam.target, [3]f32{0, 1, 0})
+	proj_mat := lal.matrix4_perspective_f32(
+		lal.to_radians(r.cam.fovy),
+		r.cam.aspect,
+		r.cam.near,
+		r.cam.far,
+	)
+	r._cam_vp = proj_mat * view
+	r._frustrum_corners = calc_frustrum_corners(r._cam_vp)
+	r._frustrum_center = calc_frustrum_center(r._frustrum_corners)
 }
 
 draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
@@ -545,20 +538,24 @@ draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 	}
 	light_key, has_light := node.light.?
 	add_light: if has_light {
-		lights := &r._lights_cpu
+		lights := &r._frag_frame_ubo
 		num_light := &lights.num_light[light_key.type]
 		if num_light^ == MAX_RENDER_LIGHTS do break add_light
-		shadow_idx: i32
+		shadow_idx: u32
 		gpu_idx := num_light^
 		num_light^ += 1
 		switch light_key.type {
-		case .POINT:
-			light := model.point_lights[light_key.idx]
-			lights.point_lights[gpu_idx] = light
-			shadow_idx = light.shadow_idx
 		case .DIR:
 			light := model.dir_lights[light_key.idx]
+			light.dir_to_light = -lal.normalize(
+				lal.matrix3_from_matrix4(req.transform) * [3]f32{0, 0, -1},
+			) // TODO make sure this goochie
 			lights.dir_lights[gpu_idx] = light
+			shadow_idx = light.shadow_idx
+		case .POINT:
+			light := model.point_lights[light_key.idx]
+			light.pos = req.transform[3].xyz
+			lights.point_lights[gpu_idx] = light
 			shadow_idx = light.shadow_idx
 		case .SPOT:
 			light := model.spot_lights[light_key.idx]
@@ -569,18 +566,17 @@ draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 			lights.area_lights[gpu_idx] = light
 			shadow_idx = light.shadow_idx
 		}
-		if shadow_idx == -1 || r._frame_buf_lens[.SHADOW] == MAX_SHADOW_TEX do break add_light
-		shadow_idx = i32(r._frame_buf_lens[.SHADOW])
-		proj: mat4
-		light_pos: [3]f32
-		light_target: [3]f32
+		if shadow_idx == 0 || r._frame_buf_lens[.SHADOW] == MAX_SHADOW_TEX do break add_light
+		shadow_idx = r._frame_buf_lens[.SHADOW]
 		switch light_key.type {
 		case .DIR:
 			lights.dir_lights[gpu_idx].shadow_idx = shadow_idx
 			light := model.dir_lights[light_key.idx]
-			light_target = r.cam.target
-			light_pos = r.cam.target + light.dir_to_light.xyz * r.cam.far
-			proj = lal.matrix_ortho3d(-10.0, 10.0, -10.0, 10.0, r.cam.near, r.cam.far)
+			lights.shadow_vps[shadow_idx] = calc_dir_light_vp(
+				r._frustrum_corners,
+				r._frustrum_center,
+				light.dir_to_light,
+			)
 		case .POINT:
 			// TODO
 			lights.point_lights[gpu_idx].shadow_idx = shadow_idx
@@ -594,9 +590,6 @@ draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 			lights.area_lights[gpu_idx].shadow_idx = shadow_idx
 			light := model.area_lights[light_key.idx]
 		}
-		view := lal.matrix4_look_at_f32(light_pos, light_target, [3]f32{0, 1, 0})
-		vp := proj * view
-		lights.shadow_vps[shadow_idx] = vp
 		r._frame_buf_lens[.SHADOW] += 1
 	}
 	num_child := len(node.children)
@@ -616,12 +609,10 @@ end_draw :: proc(r: ^Renderer) {
 
 	map_frame_transfer_buf(r)
 	copy_draw_call_reqs(r)
-	copy_lights(r)
 	unmap_frame_transfer_buf(r)
 
 	start_copy_pass(r)
 	upload_transform_buf(r)
-	upload_lights_buf(r)
 	upload_draw_call_buf(r)
 	end_copy_pass(r)
 }
@@ -738,13 +729,6 @@ copy_draw_call_reqs :: proc(r: ^Renderer) {
 	r._frame_buf_lens[.MODEL_BATCH] += 1
 }
 
-@(private)
-copy_lights :: proc(r: ^Renderer) {
-	lights_gpu := &r._frame_transfer_mem.lights
-	lights_gpu^ = r._lights_cpu // that was easy!
-	mem.zero_item(&r._lights_cpu.num_light)
-	return
-}
 
 @(private)
 map_frame_transfer_buf :: proc(r: ^Renderer) {
@@ -801,19 +785,6 @@ upload_transform_buf :: proc(r: ^Renderer) {
 }
 
 
-@(private)
-upload_lights_buf :: proc(r: ^Renderer) {
-	transfer_offset :: u32(offset_of(Frame_Transfer_Mem, lights))
-	size :: u32(size_of(Lights_Storage_Mem))
-
-	sdl.UploadToGPUBuffer(
-		r._copy_pass,
-		{transfer_buffer = r._frame_transfer_buf, offset = transfer_offset},
-		{buffer = r._lights_gpu_buf, size = size},
-		false,
-	)
-}
-
 begin_render :: proc(r: ^Renderer) {
 	assert(r._render_cmd_buf == nil)
 	r._render_cmd_buf = sdl.AcquireGPUCommandBuffer(r._gpu);sdle.err(r._render_cmd_buf)
@@ -857,7 +828,7 @@ shadow_pass :: proc(r: ^Renderer) {
 	num_shadow_casters := r._frame_buf_lens[.SHADOW]
 	if num_shadow_casters == 0 do return
 
-	lights := &r._lights_cpu
+	lights := &r._frag_frame_ubo
 	vert_ubo: Vert_UBO
 	for i: u32 = 0; i < num_shadow_casters; i += 1 {
 		depth_target_info := sdl.GPUDepthStencilTargetInfo {
@@ -876,9 +847,8 @@ shadow_pass :: proc(r: ^Renderer) {
 		sdl.BindGPUVertexStorageBuffers(render_pass, 0, &(r._transform_gpu_buf), 1)
 		vert_ubo.vp = lights.shadow_vps[i]
 		sdl.PushGPUVertexUniformData(r._render_cmd_buf, 0, &(vert_ubo), size_of(Vert_UBO))
-		//TODO bind and issue draw calls per model (not material)
 		for mod_batch in r._draw_model_batch {
-			bind_model(r, mod_batch.model_idx)
+			bind_model_positions(r, render_pass, mod_batch.model_idx)
 			sdl.DrawGPUIndexedPrimitivesIndirect(
 				render_pass,
 				r._draw_indirect_buf,
@@ -905,32 +875,26 @@ opaque_pass :: proc(r: ^Renderer) {
 	if r._frame_buf_lens[.MAT_BATCH] == 0 do return
 	sdl.BindGPUGraphicsPipeline(r._render_pass, r._pbr_pipeline)
 	sdl.BindGPUVertexStorageBuffers(r._render_pass, 0, &(r._transform_gpu_buf), 1)
-	sdl.BindGPUFragmentStorageBuffers(r._render_pass, 0, &(r._lights_gpu_buf), 1)
-
-	view := lal.matrix4_look_at_f32(r.cam.pos, r.cam.target, [3]f32{0, 1, 0})
-	proj_mat := lal.matrix4_perspective_f32(
-		lal.to_radians(r.cam.fovy),
-		r.cam.aspect,
-		r.cam.near,
-		r.cam.far,
-	)
-	vp := proj_mat * view
 	vert_ubo := Vert_UBO {
-		vp = vp,
+		vp = r._cam_vp,
 	}
 	sdl.PushGPUVertexUniformData(r._render_cmd_buf, 0, &(vert_ubo), size_of(Vert_UBO))
-	frag_ubo: Frag_Frame_UBO
 
-	frag_ubo.view_pos.xyz = r.cam.pos
-	frag_ubo.ambient_light_color.rgb = r.ambient_light_color
+	r._frag_frame_ubo.view_pos.xyz = r.cam.pos
+	r._frag_frame_ubo.ambient_light_color.rgb = r.ambient_light_color
 
-	sdl.PushGPUFragmentUniformData(r._render_cmd_buf, 0, &(frag_ubo), size_of(Frag_Frame_UBO))
+	sdl.PushGPUFragmentUniformData(
+		r._render_cmd_buf,
+		0,
+		&(r._frag_frame_ubo),
+		size_of(Frag_Frame_UBO),
+	)
 
 	model_idx: glist.Glist_Idx
 	first_mat_batch: {
 		first := r._draw_material_batch[0]
-		bind_model(r, first.model_idx)
-		bind_material(r, first.model_idx, first.material_idx)
+		bind_model(r, r._render_pass, first.model_idx)
+		bind_material(r, r._render_pass, first.model_idx, first.material_idx)
 		sdl.DrawGPUIndexedPrimitivesIndirect(
 			r._render_pass,
 			r._draw_indirect_buf,
@@ -942,9 +906,9 @@ opaque_pass :: proc(r: ^Renderer) {
 	for x in r._draw_material_batch[1:r._frame_buf_lens[.MAT_BATCH]] {
 		if x.model_idx != model_idx {
 			model_idx = x.model_idx
-			bind_model(r, model_idx)
+			bind_model(r, r._render_pass, model_idx)
 		}
-		bind_material(r, model_idx, x.material_idx)
+		bind_material(r, r._render_pass, model_idx, x.material_idx)
 		sdl.DrawGPUIndexedPrimitivesIndirect(
 			r._render_pass,
 			r._draw_indirect_buf,
@@ -953,21 +917,36 @@ opaque_pass :: proc(r: ^Renderer) {
 		)
 	}
 }
+@(private)
+bind_model_positions :: proc(
+	r: ^Renderer,
+	render_pass: ^sdl.GPURenderPass,
+	model_idx: glist.Glist_Idx,
+) {
+	model := glist.get(r.models, model_idx)
+	sdl.BindGPUVertexBuffers(render_pass, 0, &(model.vert_bufs[.POS]), 1)
+	sdl.BindGPUIndexBuffer(render_pass, model.index_buf, ._16BIT)
+}
 
 @(private)
-bind_model :: proc(r: ^Renderer, model_idx: glist.Glist_Idx) {
+bind_model :: proc(r: ^Renderer, render_pass: ^sdl.GPURenderPass, model_idx: glist.Glist_Idx) {
 	model := glist.get(r.models, model_idx)
 	sdl.BindGPUVertexBuffers(
-		r._render_pass,
+		render_pass,
 		0,
 		cast([^]sdl.GPUBufferBinding)&model.vert_bufs,
 		len(model.vert_bufs),
 	)
-	sdl.BindGPUIndexBuffer(r._render_pass, model.index_buf, ._16BIT)
+	sdl.BindGPUIndexBuffer(render_pass, model.index_buf, ._16BIT)
 }
 
 @(private)
-bind_material :: proc(r: ^Renderer, model_idx: glist.Glist_Idx, material_idx: u32) {
+bind_material :: proc(
+	r: ^Renderer,
+	render_pass: ^sdl.GPURenderPass,
+	model_idx: glist.Glist_Idx,
+	material_idx: u32,
+) {
 	model := glist.get(r.models, model_idx)
 	material := model.materials[material_idx]
 	draw_ubo := Frag_Draw_UBO {
@@ -976,7 +955,7 @@ bind_material :: proc(r: ^Renderer, model_idx: glist.Glist_Idx, material_idx: u3
 	}
 	sdl.PushGPUFragmentUniformData(r._render_cmd_buf, 1, &(draw_ubo), size_of(Frag_Draw_UBO))
 	sdl.BindGPUFragmentSamplers(
-		r._render_pass,
+		render_pass,
 		0,
 		cast([^]sdl.GPUTextureSamplerBinding)&material.bindings,
 		len(material.bindings),
