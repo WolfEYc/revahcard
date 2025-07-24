@@ -48,6 +48,15 @@ main :: proc() {
 	// drag_racer_node, has_drag_racer_node :=
 	// 	drag_racer_model.node_map["CompareNormal"];assert(has_drag_racer_node)
 	light_cube_idx, has_light_cube := r.model_map["white_light_cube.glb"];assert(has_light_cube)
+	sun_n_floor_idx, has_sun_n_floor := r.model_map["sun_n_floor.glb"];assert(has_sun_n_floor)
+	sun_idx: u32
+	floor_idx: u32
+	{
+		model := glist.get(r.models, sun_n_floor_idx)
+		sun_idx = model.node_map["Sphere"]
+		floor_idx = model.node_map["Cube"]
+	}
+
 	r.cam.pos.y = 1
 	r.cam.pos.z = 1
 
@@ -116,8 +125,30 @@ main :: proc() {
 				transform = transform2,
 				node_idx  = 1,
 			}
-			renderer.draw_node(r, req1)
-			renderer.draw_node(r, req2)
+			// renderer.draw_node(r, req1)
+			// renderer.draw_node(r, req2)
+		}
+		{
+			floor_rot := lal.QUATERNIONF32_IDENTITY
+			floor_transform := lal.matrix4_from_trs_f32(
+				[3]f32{0, -1, 0},
+				floor_rot,
+				[3]f32{1, 1, 1},
+			)
+			floor_req := renderer.Draw_Node_Req {
+				model_idx = sun_n_floor_idx,
+				transform = floor_transform,
+				node_idx  = floor_idx,
+			}
+			sun_rot := lal.quaternion_from_pitch_yaw_roll_f32(lal.PI / 2, lal.PI / 4, lal.PI / 4)
+			sun_transform := lal.matrix4_from_trs_f32([3]f32{1, 3, 1}, sun_rot, [3]f32{1, 1, 1})
+			sun_req := renderer.Draw_Node_Req {
+				model_idx = sun_n_floor_idx,
+				transform = sun_transform,
+				node_idx  = sun_idx,
+			}
+			renderer.draw_node(r, floor_req)
+			renderer.draw_node(r, sun_req)
 		}
 		renderer.end_draw(r)
 

@@ -120,7 +120,8 @@ float shadow_mult() {
     vec4 pos_light_space = shadow_vp * vec4(in_world_pos, 1.0);
     vec3 proj_coords = pos_light_space.xyz / pos_light_space.w;
     proj_coords = proj_coords * 0.5 + 0.5;
-    float bias = max(0.05 * (1.0 - dot(brdf_args.normal, brdf_args.dir_to_light)), 0.005);  
+    // float bias = max(0.05 * (1.0 - dot(brdf_args.normal, brdf_args.dir_to_light)), 0.005);  
+    const float bias = 0.005;
     proj_coords.z -= bias;
     float shadow = texture(shadow_sampler, proj_coords);
     bool inBounds = all(greaterThanEqual(proj_coords.xy, vec2(0.0))) &&

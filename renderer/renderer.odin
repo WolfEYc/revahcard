@@ -238,7 +238,7 @@ init_shadow_pipe :: proc(r: ^Renderer) {
 				compare_op = .LESS,
 			},
 			rasterizer_state = {
-				cull_mode = .BACK,
+				cull_mode = .FRONT,
 				// fill_mode = .LINE,
 			},
 			target_info = {
@@ -532,9 +532,7 @@ draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 		switch light_key.type {
 		case .DIR:
 			light := model.dir_lights[light_key.idx]
-			light.dir_to_light.xyz = -lal.normalize(
-				lal.matrix3_from_matrix4(req.transform) * [3]f32{0, 0, -1},
-			) // TODO make sure this goochie
+			light.dir_to_light.xyz = lal.normalize(req.transform[2].xyz) // TODO make sure this goochie
 			lights.dir_light = light
 		case .POINT:
 			light := model.point_lights[light_key.idx]
@@ -548,11 +546,10 @@ draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 			lights.area_lights[gpu_idx] = light
 		}
 		if light_key.type != .DIR do break add_light
-		light := model.dir_lights[light_key.idx]
 		lights.shadow_vp = calc_dir_light_vp(
 			r._frustrum_corners,
 			r._frustrum_center,
-			light.dir_to_light.xyz,
+			lights.dir_light.dir_to_light.xyz,
 		)
 		r._frame_buf_lens[.SHADOW] += 1
 	}
@@ -810,7 +807,7 @@ shadow_pass :: proc(r: ^Renderer) {
 	sdl.BindGPUVertexStorageBuffers(render_pass, 0, &(r._transform_gpu_buf), 1)
 	vert_ubo.vp = lights.shadow_vp
 	sdl.PushGPUVertexUniformData(r._render_cmd_buf, 0, &(vert_ubo), size_of(Vert_UBO))
-	for mod_batch in r._draw_model_batch {
+	for mod_batch in r._draw_model_batch[:r._frame_buf_lens[.MODEL_BATCH]] {
 		bind_model_positions(r, render_pass, mod_batch.model_idx)
 		sdl.DrawGPUIndexedPrimitivesIndirect(
 			render_pass,

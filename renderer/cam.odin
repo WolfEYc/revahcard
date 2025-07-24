@@ -1,5 +1,7 @@
 package renderer
 
+import "core:encoding/endian"
+import "core:log"
 import "core:math"
 import lal "core:math/linalg"
 
@@ -41,33 +43,33 @@ calc_dir_light_vp :: proc(
 ) -> (
 	vp: mat4,
 ) {
-	v := lal.matrix4_look_at_f32(center + dir_to_light, center, [3]f32{0, 1, 0})
-	min_vec: [3]f32 = math.F32_MAX
-	max_vec: [3]f32 = math.F32_MIN
-	for corner in corners {
-		trf := v * corner
-		min_vec.x = min(min_vec.x, trf.x)
-		min_vec.y = min(min_vec.y, trf.y)
-		min_vec.z = min(min_vec.z, trf.z)
-		max_vec.x = max(max_vec.x, trf.x)
-		max_vec.y = max(max_vec.y, trf.y)
-		max_vec.z = max(max_vec.z, trf.z)
-	}
+	v := lal.matrix4_look_at_f32(dir_to_light * 5, [3]f32{0, 0, 0}, [3]f32{0, 1, 0})
+	// min_vec: [3]f32 = math.F32_MAX
+	// max_vec: [3]f32 = math.F32_MIN
+	// for corner in corners {
+	// 	trf := v * corner
+	// 	min_vec.x = min(min_vec.x, trf.x)
+	// 	min_vec.y = min(min_vec.y, trf.y)
+	// 	min_vec.z = min(min_vec.z, trf.z)
+	// 	max_vec.x = max(max_vec.x, trf.x)
+	// 	max_vec.y = max(max_vec.y, trf.y)
+	// 	max_vec.z = max(max_vec.z, trf.z)
+	// }
 
-	zMult :: 10.0
+	// zMult :: 10.0
 
-	if min_vec.z < 0 {
-		min_vec.z *= zMult
-	} else {
-		min_vec.z /= zMult
-	}
-	if max_vec.z < 0 {
-		max_vec.z /= zMult
-	} else {
-		max_vec.z *= zMult
-	}
+	// if min_vec.z < 0 {
+	// 	min_vec.z *= zMult
+	// } else {
+	// 	min_vec.z /= zMult
+	// }
+	// if max_vec.z < 0 {
+	// 	max_vec.z /= zMult
+	// } else {
+	// 	max_vec.z *= zMult
+	// }
 
-	p := lal.matrix_ortho3d_f32(min_vec.x, max_vec.x, min_vec.y, max_vec.y, min_vec.z, max_vec.z)
+	p := lal.matrix_ortho3d_f32(-10, 10, -10, 10, -10, 10)
 	vp = p * v
 	return
 }
