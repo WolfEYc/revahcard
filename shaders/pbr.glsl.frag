@@ -37,7 +37,7 @@ layout(set=2, binding=2) uniform sampler2D metal_rough_sampler;
 layout(set=2, binding=3) uniform sampler2D ao_sampler;
 layout(set=2, binding=4) uniform sampler2D emissive_sampler;
 
-layout(set=2, binding=5) uniform sampler2DShadow shadow_sampler;
+layout(set=2, binding=5) uniform sampler2D shadow_sampler;
 
 #define LIGHT_MAX 4
 
@@ -121,9 +121,11 @@ float shadow_mult() {
     vec3 proj_coords = pos_light_space.xyz / pos_light_space.w;
     proj_coords = proj_coords * 0.5 + 0.5;
     // float bias = max(0.05 * (1.0 - dot(brdf_args.normal, brdf_args.dir_to_light)), 0.005);  
-    const float bias = 0.005;
+    const float bias = 0.05;
+    const float ambient = 0.01;
     proj_coords.z -= bias;
-    float shadow = texture(shadow_sampler, proj_coords);
+    float light_depth = texture(shadow_sampler, proj_coords.xy).r;
+    float shadow = proj_coords.z > light_depth ? ambient : 1.0;
     bool inBounds = all(greaterThanEqual(proj_coords.xy, vec2(0.0))) &&
                 all(lessThanEqual(proj_coords.xy, vec2(1.0)));
     return inBounds ? shadow : 1.0;

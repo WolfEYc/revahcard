@@ -39,11 +39,12 @@ calc_frustrum_center :: proc(corners: Frustrum_Corners) -> (center: [3]f32) {
 calc_dir_light_vp :: proc(
 	corners: Frustrum_Corners,
 	center: [3]f32,
+	light_pos: [3]f32,
 	dir_to_light: [3]f32,
 ) -> (
 	vp: mat4,
 ) {
-	v := lal.matrix4_look_at_f32(dir_to_light * 5, [3]f32{0, 0, 0}, [3]f32{0, 1, 0})
+	v := lal.matrix4_look_at_f32(dir_to_light, [3]f32{0, 0, 0}, [3]f32{0, 1, 0})
 	// min_vec: [3]f32 = math.F32_MAX
 	// max_vec: [3]f32 = math.F32_MIN
 	// for corner in corners {
@@ -69,7 +70,7 @@ calc_dir_light_vp :: proc(
 	// 	max_vec.z *= zMult
 	// }
 
-	p := lal.matrix_ortho3d_f32(-10, 10, -10, 10, -10, 10)
+	p := lal.matrix_ortho3d_f32(-10, 10, -10, 10, 0.1, 10)
 	vp = p * v
 	return
 }

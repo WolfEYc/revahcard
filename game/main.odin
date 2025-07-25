@@ -140,15 +140,7 @@ main :: proc() {
 				transform = floor_transform,
 				node_idx  = floor_idx,
 			}
-			sun_rot := lal.quaternion_from_pitch_yaw_roll_f32(lal.PI / 2, lal.PI / 4, lal.PI / 4)
-			sun_transform := lal.matrix4_from_trs_f32([3]f32{1, 3, 1}, sun_rot, [3]f32{1, 1, 1})
-			sun_req := renderer.Draw_Node_Req {
-				model_idx = sun_n_floor_idx,
-				transform = sun_transform,
-				node_idx  = sun_idx,
-			}
 			renderer.draw_node(r, floor_req)
-			renderer.draw_node(r, sun_req)
 		}
 		renderer.end_draw(r)
 

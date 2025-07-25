@@ -501,6 +501,10 @@ begin_draw :: proc(r: ^Renderer) {
 	r._frustrum_center = calc_frustrum_center(r._frustrum_corners)
 }
 
+draw_dir_light :: proc(r: ^Renderer, l: GPU_Dir_Light) {
+	//TODO lets keep things simple
+}
+
 draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 	model := glist.get(r.models, req.model_idx)
 	node := model.nodes[req.node_idx]
@@ -520,38 +524,6 @@ draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 			r._draw_req_transforms[r._frame_buf_lens[.DRAW_REQ]] = req.transform
 			r._frame_buf_lens[.DRAW_REQ] += 1
 		}
-	}
-	light_key, has_light := node.light.?
-	add_light: if has_light {
-		lights := &r._frag_frame_ubo
-		num_light := &lights.num_light[light_key.type]
-		if num_light^ == MAX_RENDER_LIGHTS || (light_key.type == .DIR && num_light^ == 1) do break add_light
-		shadow_idx: i32
-		gpu_idx := num_light^
-		num_light^ += 1
-		switch light_key.type {
-		case .DIR:
-			light := model.dir_lights[light_key.idx]
-			light.dir_to_light.xyz = lal.normalize(req.transform[2].xyz) // TODO make sure this goochie
-			lights.dir_light = light
-		case .POINT:
-			light := model.point_lights[light_key.idx]
-			light.pos = req.transform[3]
-			lights.point_lights[gpu_idx] = light
-		case .SPOT:
-			light := model.spot_lights[light_key.idx]
-			lights.spot_lights[gpu_idx] = light
-		case .AREA:
-			light := model.area_lights[light_key.idx]
-			lights.area_lights[gpu_idx] = light
-		}
-		if light_key.type != .DIR do break add_light
-		lights.shadow_vp = calc_dir_light_vp(
-			r._frustrum_corners,
-			r._frustrum_center,
-			lights.dir_light.dir_to_light.xyz,
-		)
-		r._frame_buf_lens[.SHADOW] += 1
 	}
 	num_child := len(node.children)
 	if num_child == 0 do return
