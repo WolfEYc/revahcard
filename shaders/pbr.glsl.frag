@@ -120,8 +120,8 @@ float shadow_mult() {
     vec4 proj_coords = in_shadow_pos;
     proj_coords.xy *= 0.5;
     proj_coords.xy += 0.5;
-    float bias = max(0.05 * (1.0 - dot(brdf_args.normal, brdf_args.dir_to_light)), 0.0005);  
-    // const float bias = 0.0005;
+    // float bias = max(0.05 * (1.0 - dot(brdf_args.normal, brdf_args.dir_to_light)), 0.0005);  
+    const float bias = 0.0005;
     const float ambient = 0.1;
     proj_coords.z -= bias;
     float shadow = textureProj(shadow_sampler, proj_coords);
