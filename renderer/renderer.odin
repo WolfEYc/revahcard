@@ -55,7 +55,6 @@ Renderer :: struct {
 	_default_emissive_binding: sdl.GPUTextureSamplerBinding,
 
 	// frame gpu mem
-	_cam_vp:                   mat4,
 	_frustrum_corners:         Frustrum_Corners,
 	_frustrum_center:          [3]f32,
 	_copy_cmd_buf:             ^sdl.GPUCommandBuffer,
@@ -65,6 +64,7 @@ Renderer :: struct {
 	_frame_transfer_buf:       ^sdl.GPUTransferBuffer,
 	_render_cmd_buf:           ^sdl.GPUCommandBuffer,
 	_render_pass:              ^sdl.GPURenderPass,
+	_vert_ubo:                 Vert_UBO,
 	_frag_frame_ubo:           Frag_Frame_UBO,
 	_draw_indirect_buf:        ^sdl.GPUBuffer,
 	_draw_call_reqs:           [MAX_RENDER_NODES]Draw_Call_Req,
@@ -79,7 +79,6 @@ Frame_Buf_Len :: enum {
 	DRAW_REQ,
 	MAT_BATCH,
 	MODEL_BATCH,
-	SHADOW,
 }
 
 Camera :: struct {
@@ -116,15 +115,18 @@ GPU_Area_Light :: struct {
 	_pad:      [3]f32,
 }
 
-Vert_UBO :: struct {
+Shadow_Vert_UBO :: struct {
 	vp: mat4,
+}
+Vert_UBO :: struct {
+	vp:        mat4,
+	shadow_vp: mat4,
 }
 Frag_Frame_UBO :: struct #packed {
 	view_pos:            [4]f32,
 	ambient_light_color: [4]f32,
 	num_light:           [Light_Type]u32,
 	dir_light:           GPU_Dir_Light,
-	shadow_vp:           mat4,
 	point_lights:        [MAX_RENDER_LIGHTS]GPU_Point_Light,
 	spot_lights:         [MAX_RENDER_LIGHTS]GPU_Spot_Light,
 	area_lights:         [MAX_RENDER_LIGHTS]GPU_Area_Light,
@@ -253,7 +255,7 @@ init_shadow_pipe :: proc(r: ^Renderer) {
 	return
 }
 
-SHADOW_TEX_DIM :: 1024
+SHADOW_TEX_DIM :: 2048
 
 init :: proc(
 	gpu: ^sdl.GPUDevice,
@@ -316,7 +318,7 @@ init :: proc(
 			address_mode_u = .CLAMP_TO_EDGE,
 			address_mode_v = .CLAMP_TO_EDGE,
 			enable_compare = true,
-			compare_op = .LESS_OR_EQUAL,
+			compare_op = .LESS,
 		},
 	)
 	r._shadow_binding = sdl.GPUTextureSamplerBinding {
@@ -496,13 +498,13 @@ begin_draw :: proc(r: ^Renderer) {
 		r.cam.near,
 		r.cam.far,
 	)
-	r._cam_vp = proj_mat * view
-	r._frustrum_corners = calc_frustrum_corners(r._cam_vp)
-	r._frustrum_center = calc_frustrum_center(r._frustrum_corners)
+	r._vert_ubo.vp = proj_mat * view
 }
 
-draw_dir_light :: proc(r: ^Renderer, l: GPU_Dir_Light) {
-	//TODO lets keep things simple
+draw_dir_light :: proc(r: ^Renderer, l: GPU_Dir_Light, pos: [3]f32) {
+	r._frag_frame_ubo.dir_light = l
+	r._vert_ubo.shadow_vp = calc_dir_light_vp(pos)
+	r._frag_frame_ubo.num_light[.DIR] = 1
 }
 
 draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
@@ -758,11 +760,9 @@ begin_screen_render_pass :: proc(r: ^Renderer) {
 }
 
 shadow_pass :: proc(r: ^Renderer) {
-	num_shadow_casters := r._frame_buf_lens[.SHADOW]
-	if num_shadow_casters == 0 do return
-
 	lights := &r._frag_frame_ubo
-	vert_ubo: Vert_UBO
+	if lights.num_light[.DIR] == 0 do return
+
 	depth_target_info := sdl.GPUDepthStencilTargetInfo {
 		texture     = r._shadow_tex,
 		load_op     = .CLEAR,
@@ -777,8 +777,10 @@ shadow_pass :: proc(r: ^Renderer) {
 	);sdle.err(render_pass)
 	sdl.BindGPUGraphicsPipeline(render_pass, r._shadow_pipeline)
 	sdl.BindGPUVertexStorageBuffers(render_pass, 0, &(r._transform_gpu_buf), 1)
-	vert_ubo.vp = lights.shadow_vp
-	sdl.PushGPUVertexUniformData(r._render_cmd_buf, 0, &(vert_ubo), size_of(Vert_UBO))
+	vert_ubo := Shadow_Vert_UBO {
+		vp = r._vert_ubo.shadow_vp,
+	}
+	sdl.PushGPUVertexUniformData(r._render_cmd_buf, 0, &(vert_ubo), size_of(Shadow_Vert_UBO))
 	for mod_batch in r._draw_model_batch[:r._frame_buf_lens[.MODEL_BATCH]] {
 		bind_model_positions(r, render_pass, mod_batch.model_idx)
 		sdl.DrawGPUIndexedPrimitivesIndirect(
@@ -795,10 +797,7 @@ opaque_pass :: proc(r: ^Renderer) {
 	if r._frame_buf_lens[.MAT_BATCH] == 0 do return
 	sdl.BindGPUGraphicsPipeline(r._render_pass, r._pbr_pipeline)
 	sdl.BindGPUVertexStorageBuffers(r._render_pass, 0, &(r._transform_gpu_buf), 1)
-	vert_ubo := Vert_UBO {
-		vp = r._cam_vp,
-	}
-	sdl.PushGPUVertexUniformData(r._render_cmd_buf, 0, &(vert_ubo), size_of(Vert_UBO))
+	sdl.PushGPUVertexUniformData(r._render_cmd_buf, 0, &(r._vert_ubo), size_of(Vert_UBO))
 
 	r._frag_frame_ubo.view_pos.xyz = r.cam.pos
 	r._frag_frame_ubo.ambient_light_color.rgb = r.ambient_light_color

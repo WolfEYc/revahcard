@@ -37,7 +37,7 @@ layout(set=2, binding=2) uniform sampler2D metal_rough_sampler;
 layout(set=2, binding=3) uniform sampler2D ao_sampler;
 layout(set=2, binding=4) uniform sampler2D emissive_sampler;
 
-layout(set=2, binding=5) uniform sampler2D shadow_sampler;
+layout(set=2, binding=5) uniform sampler2DShadow shadow_sampler;
 
 #define LIGHT_MAX 4
 
@@ -49,7 +49,6 @@ layout(set=3, binding=0) uniform Frame_UBO {
     uint num_spot_lights;
     uint num_area_lights;
     Dir_Light dir_light;
-    mat4 shadow_vp;
     Point_Light point_lights[LIGHT_MAX];
     Spot_Light spot_lights[LIGHT_MAX];
     Area_Light area_lights[LIGHT_MAX];
@@ -73,9 +72,10 @@ struct BRDF_Args {
 } brdf_args;
 
 layout(location=0) in vec3 in_world_pos;
-layout(location=1) in vec2 in_uv;
-layout(location=2) in vec2 in_uv1;
-layout(location=3) in mat3 in_tbn;
+layout(location=1) in vec4 in_shadow_pos;
+layout(location=2) in vec2 in_uv;
+layout(location=3) in vec2 in_uv1;
+layout(location=4) in mat3 in_tbn;
 
 layout(location=0) out vec4 out_color;
 
@@ -117,17 +117,18 @@ float geometry_smith(float normal_dot_view, float normal_dot_light, float roughn
 
 
 float shadow_mult() {
-    vec4 pos_light_space = shadow_vp * vec4(in_world_pos, 1.0);
-    vec3 proj_coords = pos_light_space.xyz / pos_light_space.w;
-    proj_coords = proj_coords * 0.5 + 0.5;
-    // float bias = max(0.05 * (1.0 - dot(brdf_args.normal, brdf_args.dir_to_light)), 0.005);  
-    const float bias = 0.05;
-    const float ambient = 0.01;
+    vec4 proj_coords = in_shadow_pos;
+    proj_coords.xy *= 0.5;
+    proj_coords.xy += 0.5;
+    float bias = max(0.05 * (1.0 - dot(brdf_args.normal, brdf_args.dir_to_light)), 0.0005);  
+    // const float bias = 0.0005;
+    const float ambient = 0.1;
     proj_coords.z -= bias;
-    float light_depth = texture(shadow_sampler, proj_coords.xy).r;
-    float shadow = proj_coords.z > light_depth ? ambient : 1.0;
+    float shadow = textureProj(shadow_sampler, proj_coords);
+    shadow = max(shadow, ambient);
     bool inBounds = all(greaterThanEqual(proj_coords.xy, vec2(0.0))) &&
                 all(lessThanEqual(proj_coords.xy, vec2(1.0)));
+    // return shadow;
     return inBounds ? shadow : 1.0;
 }
 

@@ -141,6 +141,16 @@ main :: proc() {
 				node_idx  = floor_idx,
 			}
 			renderer.draw_node(r, floor_req)
+			pos := [3]f32{-0.5, 3, 0.5}
+			dir_to_light: [4]f32
+			dir_to_light.xyz = lal.normalize(pos)
+			dir_to_light.w = 1.0
+
+			renderer.draw_dir_light(
+				r,
+				{dir_to_light = dir_to_light, color = [4]f32{5, 5, 5, 1}},
+				pos,
+			)
 		}
 		renderer.end_draw(r)
 
