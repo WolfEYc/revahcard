@@ -4,6 +4,7 @@ import "../lib/glist"
 import "../lib/pool"
 import sdl "vendor:sdl3"
 import sdli "vendor:sdl3/image"
+import ttf "vendor:sdl3/ttf"
 
 import gltf "../lib/glTF2"
 import "../lib/sdle"
@@ -20,6 +21,7 @@ import "core:slice"
 import "core:strings"
 
 shader_dir :: "shaders"
+fonts_dir :: "fonts"
 dist_dir :: "dist"
 out_shader_ext :: "spv"
 texture_dir :: "textures"
@@ -32,6 +34,7 @@ MAX_MODELS :: 4096
 MAX_RENDER_NODES :: 4096
 MAX_RENDER_LIGHTS :: 4
 // MAX_SHADOW_TEX :: 6
+MAX_TEXT_SURFACES :: 1024
 
 Renderer :: struct {
 	cam:                       Camera,
@@ -72,6 +75,12 @@ Renderer :: struct {
 	_draw_material_batch:      [MAX_RENDER_NODES]Draw_Material_Batch,
 	_draw_model_batch:         [MAX_RENDER_NODES]Draw_Model_Batch,
 	_frame_buf_lens:           [Frame_Buf_Len]u32,
+
+	//ttf
+	_text_engine:              ^ttf.TextEngine,
+	_default_font:             ^ttf.Font,
+	_text_usages:              [MAX_TEXT_SURFACES]i32,
+	_text_surfaces:            [MAX_TEXT_SURFACES]sdl.GPUTextureSamplerBinding,
 }
 
 Frame_Buf_Len :: enum {
@@ -269,6 +278,15 @@ init :: proc(
 	r._gpu = gpu
 	r._window = window
 	ok = sdl.SetGPUSwapchainParameters(gpu, window, .SDR_LINEAR, .VSYNC);sdle.err(ok)
+	r._text_engine = ttf.CreateGPUTextEngine(gpu);sdle.err(r._text_engine)
+	default_font_dir ::
+		dist_dir +
+		os.Path_Separator_String +
+		fonts_dir +
+		os.Path_Separator_String +
+		"pixel_operator" +
+		"PixelOperator.ttf"
+	r._default_font = ttf.OpenFont(default_font_dir, 18);sdle.err(r._default_font)
 
 	init_pbr_pipe(r)
 	init_shadow_pipe(r)
