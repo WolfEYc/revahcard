@@ -79,7 +79,10 @@ Renderer :: struct {
 	//ttf
 	_text_engine:              ^ttf.TextEngine,
 	_default_font:             ^ttf.Font,
+	_text_alloc:               i32,
+	_text_reqs:                [MAX_TEXT_SURFACES]Text_Draw_Req,
 	_text_usages:              [MAX_TEXT_SURFACES]i32,
+	_text_dim:                 [MAX_TEXT_SURFACES][2]i32,
 	_text_surfaces:            [MAX_TEXT_SURFACES]sdl.GPUTextureSamplerBinding,
 }
 
@@ -88,6 +91,7 @@ Frame_Buf_Len :: enum {
 	DRAW_REQ,
 	MAT_BATCH,
 	MODEL_BATCH,
+	TEXT_DRAW,
 }
 
 Camera :: struct {
