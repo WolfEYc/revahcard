@@ -57,6 +57,7 @@ layout(set=3, binding=0) uniform Frame_UBO {
 layout(set=3, binding=1) uniform Draw_UBO {
     float normal_scale;
     float ao_strength;
+    vec4 diffuse_override;
 };
 
 struct BRDF_Args {
@@ -153,7 +154,7 @@ vec3 brdf()  {
 void main() {
     vec3 frag_world_to_cam = cam_world_pos.xyz - in_world_pos;
     brdf_args.dir_to_cam = normalize(frag_world_to_cam);
-    brdf_args.diffuse = texture(diffuse_sampler, in_uv).rgb;
+    brdf_args.diffuse = texture(diffuse_sampler, in_uv).rgb * diffuse_override.rgb;
     vec3 emissive = texture(emissive_sampler, in_uv).rgb;
     brdf_args.normal = calc_normal();
     vec4 metal_rough = texture(metal_rough_sampler, in_uv);
@@ -191,5 +192,5 @@ void main() {
     // HDR Reinhard tonemapping
     color /= color + vec3(1.0);
 
-    out_color = vec4(color, 1.0);
+    out_color = vec4(color, diffuse_override.a);
 }

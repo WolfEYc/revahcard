@@ -27,6 +27,7 @@ out_shader_ext :: "spv"
 texture_dir :: "textures"
 model_dir :: "models"
 model_dist_dir :: dist_dir + os.Path_Separator_String + model_dir
+font_location :: dist_dir + os.Path_Separator_String + fonts_dir
 
 mat4 :: matrix[4, 4]f32
 
@@ -56,6 +57,8 @@ Renderer :: struct {
 	_default_normal_binding:   sdl.GPUTextureSamplerBinding,
 	_default_orm_binding:      sdl.GPUTextureSamplerBinding,
 	_default_emissive_binding: sdl.GPUTextureSamplerBinding,
+	_default_text_material:       Model_Material,
+	_default_text_sampler:     ^sdl.GPUSampler,
 
 	// frame gpu mem
 	_frustrum_corners:         Frustrum_Corners,
@@ -77,13 +80,13 @@ Renderer :: struct {
 	_frame_buf_lens:           [Frame_Buf_Len]u32,
 
 	//ttf
-	_text_engine:              ^ttf.TextEngine,
-	_default_font:             ^ttf.Font,
-	_text_alloc:               i32,
-	_text_reqs:                [MAX_TEXT_SURFACES]Text_Draw_Req,
-	_text_usages:              [MAX_TEXT_SURFACES]i32,
-	_text_dim:                 [MAX_TEXT_SURFACES][2]i32,
-	_text_surfaces:            [MAX_TEXT_SURFACES]sdl.GPUTextureSamplerBinding,
+	// _text_engine:              ^ttf.TextEngine,
+	// _default_font:             ^ttf.Font,
+	// _text_alloc:               i32,
+	// _text_reqs:                [MAX_TEXT_SURFACES]Text_Draw_Req,
+	// _text_usages:              [MAX_TEXT_SURFACES]i32,
+	// _text_dim:                 [MAX_TEXT_SURFACES][2]i32,
+	// _text_surfaces:            [MAX_TEXT_SURFACES]sdl.GPUTextureSamplerBinding,
 }
 
 Frame_Buf_Len :: enum {
@@ -282,15 +285,15 @@ init :: proc(
 	r._gpu = gpu
 	r._window = window
 	ok = sdl.SetGPUSwapchainParameters(gpu, window, .SDR_LINEAR, .VSYNC);sdle.err(ok)
-	r._text_engine = ttf.CreateGPUTextEngine(gpu);sdle.err(r._text_engine)
-	default_font_dir ::
-		dist_dir +
-		os.Path_Separator_String +
-		fonts_dir +
-		os.Path_Separator_String +
-		"pixel_operator" +
-		"PixelOperator.ttf"
-	r._default_font = ttf.OpenFont(default_font_dir, 18);sdle.err(r._default_font)
+	// r._text_engine = ttf.CreateGPUTextEngine(gpu);sdle.err(r._text_engine)
+	// default_font_dir ::
+	// 	dist_dir +
+	// 	os.Path_Separator_String +
+	// 	fonts_dir +
+	// 	os.Path_Separator_String +
+	// 	"pixel_operator" +
+	// 	"PixelOperator.ttf"
+	// r._default_font = ttf.OpenFont(default_font_dir, 18);sdle.err(r._default_font)
 
 	init_pbr_pipe(r)
 	init_shadow_pipe(r)
@@ -348,14 +351,31 @@ init :: proc(
 		sampler = shadow_sampler,
 	}
 
+
 	// defaults
 	start_copy_pass(r)
 	r._defaut_sampler = sdl.CreateGPUSampler(r._gpu, {})
-	r._default_diffuse_binding = load_pixel(r, {255, 255, 0, 255})
+	r._default_diffuse_binding = load_pixel(r, {255, 255, 255, 255})
 	r._default_normal_binding = load_pixel(r, {128, 128, 255, 255})
 	r._default_orm_binding = load_pixel(r, {255, 128, 0, 255})
 	r._default_emissive_binding = load_pixel(r, {0, 0, 0, 255})
+	r._default_text_sampler = sdl.CreateGPUSampler(r._gpu, {})
+	text_binding := load_bm(r, "jetbrains_bm")
 	end_copy_pass(r)
+
+	r._default_text_material = Model_Material {
+		name = "default_text",
+		normal_scale = 1,
+		ao_strength = 0,
+		bindings = {
+			.DIFFUSE = text_binding,
+			.EMISSIVE = r._default_emissive_binding,
+			.METAL_ROUGH = r._default_orm_binding,
+			.OCCLUSION = r._default_orm_binding,
+			.NORMAL = r._default_normal_binding,
+			.SHADOW = r._shadow_binding,
+		},
+	}
 
 	r.ambient_light_color = [3]f32{0.01, 0.01, 0.01}
 
@@ -390,6 +410,7 @@ init :: proc(
 			{usage = {.INDIRECT}, size = size, props = props},
 		);sdle.err(r._draw_indirect_buf)
 	}
+
 	return
 }
 
@@ -435,14 +456,7 @@ load_pixel :: proc(r: ^Renderer, pixel: [4]byte) -> (tex: sdl.GPUTextureSamplerB
 		{texture = tex.texture, w = 1, h = 1, d = 1},
 		false,
 	)
-	sampler_info := sdl.GPUSamplerCreateInfo {
-		min_filter     = .NEAREST,
-		mag_filter     = .NEAREST,
-		mipmap_mode    = .NEAREST,
-		address_mode_u = .CLAMP_TO_EDGE,
-		address_mode_v = .CLAMP_TO_EDGE,
-	}
-	tex.sampler = sdl.CreateGPUSampler(r._gpu, sampler_info)
+	tex.sampler = r._defaut_sampler
 	return
 }
 
