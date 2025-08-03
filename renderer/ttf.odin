@@ -3,6 +3,7 @@ package renderer
 import "../lib/glist"
 import sdle "../lib/sdle"
 import "base:runtime"
+import "core:fmt"
 import "core:mem"
 import os "core:os/os2"
 import "core:path/filepath"
@@ -11,22 +12,132 @@ import sdl "vendor:sdl3"
 import sdli "vendor:sdl3/image"
 
 
-Bitmap :: struct {
-	model_idx: glist.Glist_Idx,
-	charset:   map[rune]u32, // node_idx
+quad_idxs :: [6]u16{0, 1, 2, 1, 2, 3}
+
+load_quad_idxs :: proc(r: ^Renderer) -> (binding: sdl.GPUBufferBinding) {
+	tbuf_props := sdl.CreateProperties();sdle.err(tbuf_props)
+	defer sdl.DestroyProperties(tbuf_props)
+	ok := sdl.SetStringProperty(
+		tbuf_props,
+		sdl.PROP_GPU_TRANSFERBUFFER_CREATE_NAME_STRING,
+		"quad_transfer_buf",
+	);sdle.err(ok)
+	transfer_buf := sdl.CreateGPUTransferBuffer(
+		r._gpu,
+		{usage = .UPLOAD, size = size_of(quad_idxs), props = tbuf_props},
+	);sdle.err(transfer_buf)
+	defer sdl.ReleaseGPUTransferBuffer(r._gpu, transfer_buf)
+	tmem := cast(^[6]u16)sdl.MapGPUTransferBuffer(r._gpu, transfer_buf, false)
+	tmem^ = quad_idxs
+	sdl.UnmapGPUTransferBuffer(r._gpu, transfer_buf)
+
+	gpu_buf_props := sdl.CreateProperties();sdle.err(gpu_buf_props)
+	sdl.SetStringProperty(gpu_buf_props, sdl.PROP_GPU_BUFFER_CREATE_NAME_STRING, "quad_idx_buf")
+	binding.buffer = sdl.CreateGPUBuffer(
+		r._gpu,
+		{usage = {.INDEX}, size = size_of(quad_idxs), props = gpu_buf_props},
+	);sdle.err(binding.buffer)
+	sdl.UploadToGPUBuffer(
+		r._copy_pass,
+		{transfer_buffer = transfer_buf},
+		{buffer = binding.buffer, size = size_of(quad_idxs)},
+		false,
+	)
+	return
 }
 
-load_bm :: proc(r: ^Renderer, font_filename: string) -> (bm: Bitmap) {
-	font := load_font(r, font_filename)
-	model: Model
-	model.textures = make([]^sdl.GPUTexture, 1)
-	model.textures[0] = load_bm_png(r, font.page.file)
+Bitmap :: struct {
+	material: Model_Material,
+	pos_buf:  sdl.GPUBufferBinding,
+	uv_buf:   sdl.GPUBufferBinding,
+	charset:  map[rune]u32, // quad #
+}
 
-	err: runtime.Allocator_Error
-	bm.model_idx, err = glist.insert(&r.models, model);assert(err == nil)
-	for char in font.chars {
-		// TODO gen quads (yes you gotta upload them shits to da GPU Isaac)
+load_bitmap :: proc(r: ^Renderer, font_filename: string) -> (bm: Bitmap) {
+	temp_mem := runtime.default_temp_allocator_temp_begin()
+	defer runtime.default_temp_allocator_temp_end(temp_mem)
+	font := load_font(r, font_filename)
+	diffuse := load_bm_png(r, font.page.file)
+	bm.material = Model_Material {
+		name = font_filename,
+		normal_scale = 1,
+		ao_strength = 0,
+		bindings = {
+			.DIFFUSE = {texture = diffuse, sampler = r._default_text_sampler},
+			.EMISSIVE = r._default_emissive_binding,
+			.NORMAL = r._default_normal_binding,
+			.METAL_ROUGH = r._default_orm_binding,
+			.OCCLUSION = r._default_orm_binding,
+			.SHADOW = r._shadow_binding,
+		},
 	}
+	bm.charset = make(map[rune]u32, len(font.chars))
+
+	transfer_quads: {
+		tbuf_props := sdl.CreateProperties();sdle.err(tbuf_props)
+		defer sdl.DestroyProperties(tbuf_props)
+		tbuf_name := fmt.ctprintf("%s_transfer_buf", font_filename)
+		ok := sdl.SetStringProperty(
+			tbuf_props,
+			sdl.PROP_GPU_TRANSFERBUFFER_CREATE_NAME_STRING,
+			tbuf_name,
+		);sdle.err(ok)
+		num_chars := u32(len(font.chars))
+		verts_size := num_chars * 4 * size_of(f32) * 5 // 5 cuz only pos and uv
+		transfer_buf := sdl.CreateGPUTransferBuffer(
+			r._gpu,
+			{usage = .UPLOAD, size = verts_size, props = tbuf_props},
+		);sdle.err(transfer_buf)
+		defer sdl.ReleaseGPUTransferBuffer(r._gpu, transfer_buf)
+		tmem := transmute([^]byte)sdl.MapGPUTransferBuffer(r._gpu, transfer_buf, false)
+		pos := (transmute([^][4][3]f32)tmem)[:num_chars]
+		uv_offset: u32 = size_of([4][3]f32) * num_chars
+		uv := (transmute([^][4][2]f32)tmem[uv_offset:])[:num_chars]
+		uv_size: u32 = size_of([4][2]f32) * num_chars
+
+		for char, i in font.chars {
+			pos_ptr := &pos[i]
+			uv_ptr := &uv[i]
+			char_to_quad(char, pos_ptr, uv_ptr)
+			bm.charset[char.id] = u32(i)
+		}
+		sdl.UnmapGPUTransferBuffer(r._gpu, transfer_buf)
+
+
+		pos_buf_props := sdl.CreateProperties();sdle.err(pos_buf_props)
+		pos_buf_name := fmt.ctprintf("%_pos_buf", font_filename)
+		sdl.SetStringProperty(pos_buf_props, sdl.PROP_GPU_BUFFER_CREATE_NAME_STRING, pos_buf_name)
+		bm.pos_buf.buffer = sdl.CreateGPUBuffer(
+			r._gpu,
+			{usage = {.VERTEX}, size = uv_offset, props = pos_buf_props},
+		);sdle.err(bm.pos_buf.buffer)
+		sdl.UploadToGPUBuffer(
+			r._copy_pass,
+			{transfer_buffer = transfer_buf},
+			{buffer = bm.pos_buf.buffer, size = uv_offset},
+			false,
+		)
+
+		uv_buf_props := sdl.CreateProperties();sdle.err(uv_buf_props)
+		uv_buf_name := fmt.ctprintf("%_uv_buf", font_filename)
+		sdl.SetStringProperty(uv_buf_props, sdl.PROP_GPU_BUFFER_CREATE_NAME_STRING, uv_buf_name)
+		bm.uv_buf.buffer = sdl.CreateGPUBuffer(
+			r._gpu,
+			{usage = {.VERTEX}, size = uv_size, props = uv_buf_props},
+		);sdle.err(bm.uv_buf.buffer)
+		sdl.UploadToGPUBuffer(
+			r._copy_pass,
+			{transfer_buffer = transfer_buf, offset = uv_offset},
+			{buffer = bm.uv_buf.buffer, size = uv_size},
+			false,
+		)
+	}
+	return
+}
+
+char_to_quad :: proc(char: Font_Char, pos: ^[4][3]f32, uv: ^[4][2]f32) {
+
+
 	return
 }
 
@@ -63,7 +174,7 @@ Font_Page :: struct {
 }
 Font_Chars :: []Font_Char
 Font_Char :: struct {
-	id:        int,
+	id:        rune,
 	x:         int,
 	y:         int,
 	width:     int,
@@ -131,7 +242,7 @@ load_bm_png :: proc(r: ^Renderer, filename: string) -> (tex: ^sdl.GPUTexture) {
 	sdl.UploadToGPUTexture(
 		r._copy_pass,
 		{transfer_buffer = trans, pixels_per_row = w, rows_per_layer = h},
-		{texture = binding.texture, w = w, h = h, d = 1},
+		{texture = tex, w = w, h = h, d = 1},
 		false,
 	)
 	sdl.ReleaseGPUTransferBuffer(r._gpu, trans)

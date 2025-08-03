@@ -80,6 +80,7 @@ Renderer :: struct {
 	_frame_buf_lens:           [Frame_Buf_Len]u32,
 
 	//ttf
+	_quad_idx_binding:         sdl.GPUBufferBinding,
 	// _text_engine:              ^ttf.TextEngine,
 	// _default_font:             ^ttf.Font,
 	// _text_alloc:               i32,
@@ -360,22 +361,8 @@ init :: proc(
 	r._default_orm_binding = load_pixel(r, {255, 128, 0, 255})
 	r._default_emissive_binding = load_pixel(r, {0, 0, 0, 255})
 	r._default_text_sampler = sdl.CreateGPUSampler(r._gpu, {})
-	text_binding := load_bm(r, "jetbrains_bm")
+	r._quad_bindings = load_quad_bindings(r)
 	end_copy_pass(r)
-
-	r._default_text_material = Model_Material {
-		name = "default_text",
-		normal_scale = 1,
-		ao_strength = 0,
-		bindings = {
-			.DIFFUSE = text_binding,
-			.EMISSIVE = r._default_emissive_binding,
-			.METAL_ROUGH = r._default_orm_binding,
-			.OCCLUSION = r._default_orm_binding,
-			.NORMAL = r._default_normal_binding,
-			.SHADOW = r._shadow_binding,
-		},
-	}
 
 	r.ambient_light_color = [3]f32{0.01, 0.01, 0.01}
 
@@ -630,7 +617,7 @@ copy_draw_call_reqs :: proc(r: ^Renderer) {
 	}
 	num_instances: u32 = 1
 	first_instance: u32 = 0
-	draw_cal_mem := &r._frame_transfer_mem.draw_calls
+	draw_call_mem := &r._frame_transfer_mem.draw_calls
 	end_iter := r._frame_buf_lens[.DRAW_REQ]
 	for i: u32 = 1; i < end_iter; i += 1 {
 		req := r._draw_call_reqs[i]
@@ -648,7 +635,7 @@ copy_draw_call_reqs :: proc(r: ^Renderer) {
 
 		model := glist.get(r.models, last_model_idx)
 		primitive := model.primitives[last_primitive_idx]
-		draw_cal_mem[r._frame_buf_lens[.INDIRECT]] = sdl.GPUIndexedIndirectDrawCommand {
+		draw_call_mem[r._frame_buf_lens[.INDIRECT]] = sdl.GPUIndexedIndirectDrawCommand {
 			num_indices    = primitive.num_indices,
 			num_instances  = num_instances,
 			first_index    = primitive.indices_offset,
@@ -685,7 +672,7 @@ copy_draw_call_reqs :: proc(r: ^Renderer) {
 	last_primitive_idx := last_req[Draw_Call_Sort_Idx.PRIMITIVE_IDX]
 	model := glist.get(r.models, last_model_idx)
 	primitive := model.primitives[last_primitive_idx]
-	draw_cal_mem[r._frame_buf_lens[.INDIRECT]] = sdl.GPUIndexedIndirectDrawCommand {
+	draw_call_mem[r._frame_buf_lens[.INDIRECT]] = sdl.GPUIndexedIndirectDrawCommand {
 		num_indices    = primitive.num_indices,
 		num_instances  = num_instances,
 		first_index    = primitive.indices_offset,
