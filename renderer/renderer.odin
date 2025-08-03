@@ -57,7 +57,7 @@ Renderer :: struct {
 	_default_normal_binding:   sdl.GPUTextureSamplerBinding,
 	_default_orm_binding:      sdl.GPUTextureSamplerBinding,
 	_default_emissive_binding: sdl.GPUTextureSamplerBinding,
-	_default_text_material:       Model_Material,
+	_default_text_material:    Model_Material,
 	_default_text_sampler:     ^sdl.GPUSampler,
 
 	// frame gpu mem

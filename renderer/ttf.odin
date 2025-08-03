@@ -1,5 +1,6 @@
 package renderer
 
+import "../lib/glist"
 import sdle "../lib/sdle"
 import "base:runtime"
 import "core:mem"
@@ -10,7 +11,77 @@ import sdl "vendor:sdl3"
 import sdli "vendor:sdl3/image"
 
 
-load_bm :: proc(r: ^Renderer, filename: string) -> (binding: sdl.GPUTextureSamplerBinding) {
+Bitmap :: struct {
+	model_idx: glist.Glist_Idx,
+	charset:   map[rune]u32, // node_idx
+}
+
+load_bm :: proc(r: ^Renderer, font_filename: string) -> (bm: Bitmap) {
+	font := load_font(r, font_filename)
+	model: Model
+	model.textures = make([]^sdl.GPUTexture, 1)
+	model.textures[0] = load_bm_png(r, font.page.file)
+
+	err: runtime.Allocator_Error
+	bm.model_idx, err = glist.insert(&r.models, model);assert(err == nil)
+	for char in font.chars {
+		// TODO gen quads (yes you gotta upload them shits to da GPU Isaac)
+	}
+	return
+}
+
+Font :: struct {
+	info:   Font_Info,
+	common: Font_Common,
+	page:   Font_Page,
+	chars:  Font_Chars,
+}
+Font_Info :: struct {
+	face:      string,
+	size:      int,
+	bold:      int,
+	italic:    int,
+	charset:   string,
+	unicode:   int,
+	stretch_h: int,
+	smooth:    int,
+	aa:        int,
+	padding:   [4]int,
+	spacing:   [2]int,
+}
+Font_Common :: struct {
+	line_height: int,
+	base:        int,
+	scale_w:     int,
+	scale_h:     int,
+	pages:       int,
+	packed:      int,
+}
+Font_Page :: struct {
+	id:   int,
+	file: string,
+}
+Font_Chars :: []Font_Char
+Font_Char :: struct {
+	id:        int,
+	x:         int,
+	y:         int,
+	width:     int,
+	height:    int,
+	x_offset:  int,
+	y_offset:  int,
+	x_advance: int,
+	page:      int,
+	chnl:      int,
+}
+
+load_font :: proc(r: ^Renderer, filename: string) -> (font: Font) {
+
+
+	return
+}
+
+load_bm_png :: proc(r: ^Renderer, filename: string) -> (tex: ^sdl.GPUTexture) {
 	temp_mem := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
 	sb: strings.Builder
@@ -45,7 +116,7 @@ load_bm :: proc(r: ^Renderer, filename: string) -> (binding: sdl.GPUTextureSampl
 	);sdle.err(trans_mem)
 	mem.copy_non_overlapping(trans_mem, surf.pixels, int(bytes_size))
 	sdl.UnmapGPUTransferBuffer(r._gpu, trans)
-	binding.texture = sdl.CreateGPUTexture(
+	tex = sdl.CreateGPUTexture(
 		r._gpu,
 		{
 			type = .D2,
@@ -56,7 +127,7 @@ load_bm :: proc(r: ^Renderer, filename: string) -> (binding: sdl.GPUTextureSampl
 			layer_count_or_depth = 1,
 			num_levels = 1,
 		},
-	);sdle.err(binding.texture)
+	);sdle.err(tex)
 	sdl.UploadToGPUTexture(
 		r._copy_pass,
 		{transfer_buffer = trans, pixels_per_row = w, rows_per_layer = h},
@@ -64,7 +135,6 @@ load_bm :: proc(r: ^Renderer, filename: string) -> (binding: sdl.GPUTextureSampl
 		false,
 	)
 	sdl.ReleaseGPUTransferBuffer(r._gpu, trans)
-	binding.sampler = r._default_text_sampler
 	return
 }
 
@@ -89,5 +159,8 @@ draw_text :: proc(r: ^Renderer, req: Text_Draw_Req) {
 	if !has_mat {
 		color = default_text_color
 	}
+	wrap_width, has_wrap_width := req.wrap_width.?
+
+
 }
 
