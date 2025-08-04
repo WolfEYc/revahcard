@@ -92,7 +92,9 @@ compile_shader :: proc(input_path: string, output_path: string) {
 	cmd_slice[1] = input_path
 	cmd_slice[2] = "-o"
 	cmd_slice[3] = output_path
-	process, err := os.process_start({command = cmd_slice[:], stdout = os.stderr, stderr = os.stderr})
+	process, err := os.process_start(
+		{command = cmd_slice[:], stdout = os.stderr, stderr = os.stderr},
+	)
 	if err != nil {
 		log.panicf("failed to start glslc to compile shader, reason: %v", err)
 	}

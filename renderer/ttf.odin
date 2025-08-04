@@ -4,13 +4,14 @@ import "../lib/glist"
 import sdle "../lib/sdle"
 import "base:runtime"
 import "core:fmt"
+import lal "core:math/linalg"
 import "core:mem"
 import os "core:os/os2"
 import "core:path/filepath"
+import "core:slice"
 import "core:strings"
 import sdl "vendor:sdl3"
 import sdli "vendor:sdl3/image"
-
 
 quad_idxs :: [6]u16{0, 1, 2, 1, 2, 3}
 
@@ -250,28 +251,74 @@ load_bm_png :: proc(r: ^Renderer, filename: string) -> (tex: ^sdl.GPUTexture) {
 }
 
 default_text_color :: [4]f32{0.1, 0.1, 0.1, 1}
-Text_Draw_Req :: struct {
+Draw_Text_Req :: struct {
 	text:       string,
 	transform:  mat4,
-	material:   Maybe(Model_Material),
+	bitmap:     ^Bitmap,
 	color:      Maybe([4]f32),
 	wrap_width: Maybe(i32),
 }
-draw_text :: proc(r: ^Renderer, req: Text_Draw_Req) {
-	// if r._frame_buf_lens[.TEXT_DRAW] == MAX_TEXT_SURFACES do return
-	// r._text_reqs[r._frame_buf_lens[.TEXT_DRAW]] = req
-	// r._frame_buf_lens[.TEXT_DRAW] += 1
-
-	material, has_mat := req.material.?
-	if !has_mat {
-		material = r._default_text_material
-	}
+Draw_Text_Batch :: struct {
+	color:         [4]f32,
+	bitmap:        ^Bitmap,
+	char:          rune,
+	transform_idx: u32,
+}
+draw_text :: proc(r: ^Renderer, req: Draw_Text_Req) {
+	bitmap := req.bitmap == nil ? &r._default_bitmap : req.bitmap
 	color, has_color := req.color.?
-	if !has_mat {
+	if !has_color {
 		color = default_text_color
 	}
 	wrap_width, has_wrap_width := req.wrap_width.?
+	for c in req.text {
+		if r._lens[.TEXT_DRAW] + r._lens[.DRAW_REQ] == MAX_RENDER_NODES do return
+		idx := r._lens[.TEXT_DRAW]
+		transform := req.transform // TODO some math on this to make it do the font rendering pen stuff
+
+		r._text_draw_transforms[idx] = transform
+		batch := Draw_Text_Batch {
+			color         = color,
+			bitmap        = bitmap,
+			char          = c,
+			transform_idx = idx,
+		}
+		r._draw_text_batch[idx] = batch
+		r._lens[.TEXT_DRAW] += 1
+	}
+}
+
+@(private)
+sort_text_draw_call_reqs :: proc(r: ^Renderer) {
+	slice.sort_by_cmp(
+		r._draw_text_batch[:r._lens[.TEXT_DRAW]],
+		proc(i, j: Draw_Text_Batch) -> (ordering: slice.Ordering) {
+			ordering = slice.cmp(i.bitmap, j.bitmap)
+			ordering = ordering == .Equal ? slice.cmp(i.color, j.color) : ordering
+			ordering = ordering == .Equal ? slice.cmp(i.char, j.char) : ordering
+			return
+		},
+	)
+}
+
+@(private)
+copy_text_draw_reqs :: proc(r: ^Renderer) {
+	// copies transforms and indirect draw calls to frame mem
+	if r._lens[.DRAW_REQ] == 0 do return
+	model_matrices := &r._frame_transfer_mem.transform.ms
+	normal_matrices := &r._frame_transfer_mem.transform.ns
+	end_iter := r._lens[.TEXT_DRAW]
+	matrix_offset := r._lens[.DRAW_REQ]
+	for i: u32 = 0; i < end_iter; i += 1 {
+		req := r._draw_text_batch[i]
+		idx := matrix_offset + i
+		model_matrices[idx] = r._text_draw_transforms[req.transform_idx]
+		normal_matrices[idx] = lal.inverse_transpose(model_matrices[0])
+	}
+}
 
 
+text_pass :: proc(r: ^Renderer) {
+	// TODO render da text, dont be lazy!
 }
 

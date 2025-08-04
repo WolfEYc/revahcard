@@ -30,7 +30,6 @@ Model :: struct {
 	point_lights: []GPU_Point_Light,
 	area_lights:  []GPU_Area_Light,
 	materials:    []Model_Material,
-	node_map:     map[string]u32,
 }
 
 Model_Material :: struct {
@@ -88,6 +87,7 @@ Light_Key :: struct {
 	type: Light_Type,
 }
 Model_Node :: struct {
+	name:     Maybe(string),
 	mat:      mat4,
 	mesh:     Maybe(u32),
 	light:    Maybe(Light_Key),
@@ -216,7 +216,7 @@ load_gltf :: proc(
 	r: ^Renderer,
 	file_name: string,
 ) -> (
-	model_idx: glist.Glist_Idx,
+	model: Model,
 	err: runtime.Allocator_Error,
 ) {
 	assert(r._copy_pass != nil)
@@ -233,13 +233,11 @@ load_gltf :: proc(
 		log.panicf("err loading model %s, reason: %v", file_name, load_err)
 	}
 	defer gltf.unload(data)
-	model: Model
 	model.textures = make([]^sdl.GPUTexture, len(data.images))
 	model.samplers = make([]^sdl.GPUSampler, len(data.samplers))
 	model.meshes = make([]Model_Mesh, len(data.meshes))
 	model.nodes = make([]Model_Node, len(data.nodes))
 	model.materials = make([]Model_Material, len(data.materials))
-	model.node_map = make_map_cap(map[string]u32, len(data.nodes))
 
 	images: {
 		if len(data.images) == 0 do break images
@@ -447,17 +445,17 @@ load_gltf :: proc(
 				lights_sizer[.DIR] += 1
 			case .POINT:
 				model.point_lights[lights_sizer[.POINT]] = GPU_Point_Light {
-					color      = color,
+					color = color,
 				}
 				lights_sizer[.POINT] += 1
 			case .SPOT:
 				model.spot_lights[lights_sizer[.SPOT]] = GPU_Spot_Light {
-					color      = color,
+					color = color,
 				}
 				lights_sizer[.SPOT] += 1
 			case .AREA:
 				model.area_lights[lights_sizer[.AREA]] = GPU_Area_Light {
-					color      = color,
+					color = color,
 				}
 				lights_sizer[.AREA] += 1
 			}
@@ -727,16 +725,13 @@ load_gltf :: proc(
 		node.mesh = gltf_node.mesh
 		node.children = slice.clone(gltf_node.children)
 		// log.infof("node %d has children %v", i, node.children)
-		model.nodes[i] = node
 		name, has_name := gltf_node.name.?
 		if has_name {
 			name = strings.clone(name)
-			model.node_map[name] = u32(i)
+			node.name = name
 		}
+		model.nodes[i] = node
 	}
-
-	model_idx = glist.insert(&r.models, model) or_return
-	r.model_map[file_name] = model_idx
 	return
 }
 
