@@ -754,8 +754,9 @@ upload_transform_buf :: proc(r: ^Renderer) {
 	model_offset :: transfer_offset + model_struct_offset
 	normal_struct_offset :: u32(offset_of(Transform_Storage_Mem, ns))
 	normal_offset :: transfer_offset + normal_struct_offset
-	if r._lens[.DRAW_REQ] == 0 do return
-	size := size_of(mat4) * r._lens[.DRAW_REQ]
+	len_transforms := r._lens[.DRAW_REQ] + r._lens[.TEXT_DRAW]
+	if len_transforms == 0 do return
+	size := size_of(mat4) * len_transforms
 
 	sdl.UploadToGPUBuffer(
 		r._copy_pass,

@@ -48,11 +48,15 @@ load_quad_idxs :: proc(r: ^Renderer) -> (binding: sdl.GPUBufferBinding) {
 }
 
 Bitmap :: struct {
-	material: Model_Material,
-	pos_buf:  sdl.GPUBufferBinding,
-	uv_buf:   sdl.GPUBufferBinding,
-	charset:  map[rune]u32, // quad #
+	material:  Model_Material,
+	pos_buf:   sdl.GPUBufferBinding,
+	uv_buf:    sdl.GPUBufferBinding,
+	glyphs:    map[rune]Glyph, // quad #
+	base:      f32,
+	y_advance: f32,
 }
+
+PIXEL_PER_WORLD :: 0.005
 
 load_bitmap :: proc(r: ^Renderer, font_filename: string) -> (bm: Bitmap) {
 	temp_mem := runtime.default_temp_allocator_temp_begin()
@@ -72,7 +76,9 @@ load_bitmap :: proc(r: ^Renderer, font_filename: string) -> (bm: Bitmap) {
 			.SHADOW = r._shadow_binding,
 		},
 	}
-	bm.charset = make(map[rune]u32, len(font.chars))
+	bm.glyphs = make(map[rune]Glyph, len(font.chars))
+	bm.y_advance = f32(font.common.line_height) * PIXEL_PER_WORLD
+	bm.base = f32(font.common.base) * PIXEL_PER_WORLD
 
 	transfer_quads: {
 		tbuf_props := sdl.CreateProperties();sdle.err(tbuf_props)
@@ -100,7 +106,13 @@ load_bitmap :: proc(r: ^Renderer, font_filename: string) -> (bm: Bitmap) {
 			pos_ptr := &pos[i]
 			uv_ptr := &uv[i]
 			char_to_quad(char, pos_ptr, uv_ptr)
-			bm.charset[char.id] = u32(i)
+			offset := [2]f32{f32(char.x_offset), f32(char.y_offset)}
+			offset *= PIXEL_PER_WORLD
+			bm.glyphs[char.id] = Glyph {
+				quad_idx  = u32(i),
+				offset    = offset,
+				x_advance = f32(char.x_advance) * PIXEL_PER_WORLD,
+			}
 		}
 		sdl.UnmapGPUTransferBuffer(r._gpu, transfer_buf)
 
@@ -137,7 +149,7 @@ load_bitmap :: proc(r: ^Renderer, font_filename: string) -> (bm: Bitmap) {
 }
 
 char_to_quad :: proc(char: Font_Char, pos: ^[4][3]f32, uv: ^[4][2]f32) {
-
+	//TODO
 
 	return
 }
@@ -256,7 +268,7 @@ Draw_Text_Req :: struct {
 	transform:  mat4,
 	bitmap:     ^Bitmap,
 	color:      Maybe([4]f32),
-	wrap_width: Maybe(i32),
+	wrap_width: Maybe(f32),
 }
 Draw_Text_Batch :: struct {
 	color:         [4]f32,
@@ -264,6 +276,12 @@ Draw_Text_Batch :: struct {
 	char:          rune,
 	transform_idx: u32,
 }
+Glyph :: struct {
+	quad_idx:  u32,
+	offset:    [2]f32,
+	x_advance: f32,
+}
+
 draw_text :: proc(r: ^Renderer, req: Draw_Text_Req) {
 	bitmap := req.bitmap == nil ? &r._default_bitmap : req.bitmap
 	color, has_color := req.color.?
@@ -271,12 +289,21 @@ draw_text :: proc(r: ^Renderer, req: Draw_Text_Req) {
 		color = default_text_color
 	}
 	wrap_width, has_wrap_width := req.wrap_width.?
+	pen: [2]f32
+	pen.y = -bitmap.base
+
 	for c in req.text {
 		if r._lens[.TEXT_DRAW] + r._lens[.DRAW_REQ] == MAX_RENDER_NODES do return
+		glyph, ok := bitmap.glyphs[c]
+		glyph = ok ? glyph : bitmap.glyphs[' ']
 		idx := r._lens[.TEXT_DRAW]
-		transform := req.transform // TODO some math on this to make it do the font rendering pen stuff
-
-		r._text_draw_transforms[idx] = transform
+		pos := pen + glyph.offset
+		pen_transform := lal.matrix4_from_trs(
+			[3]f32{pos.x, pos.y, 0},
+			lal.QUATERNIONF32_IDENTITY,
+			[3]f32{1, 1, 1},
+		)
+		r._text_draw_transforms[idx] = req.transform * pen_transform
 		batch := Draw_Text_Batch {
 			color         = color,
 			bitmap        = bitmap,
@@ -285,6 +312,10 @@ draw_text :: proc(r: ^Renderer, req: Draw_Text_Req) {
 		}
 		r._draw_text_batch[idx] = batch
 		r._lens[.TEXT_DRAW] += 1
+		pen.x += glyph.x_advance
+		if (c != ' ' && c != '\n') || pen.x < wrap_width do continue
+		pen.x = 0
+		pen.y -= bitmap.y_advance
 	}
 }
 
