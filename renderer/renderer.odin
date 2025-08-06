@@ -846,9 +846,7 @@ shadow_pass :: proc(r: ^Renderer) {
 	sdl.EndGPURenderPass(render_pass)
 }
 
-opaque_pass :: proc(r: ^Renderer, diffuse_override: [4]f32 = {1, 1, 1, 1}) {
-	if r._lens[.MAT_BATCH] == 0 do return
-	sdl.BindGPUGraphicsPipeline(r._render_pass, r._pbr_pipeline)
+bind_pbr_bufs :: proc(r: ^Renderer) {
 	sdl.BindGPUVertexStorageBuffers(r._render_pass, 0, &(r._transform_gpu_buf), 1)
 	sdl.PushGPUVertexUniformData(r._render_cmd_buf, 0, &(r._vert_ubo), size_of(Vert_UBO))
 
@@ -861,7 +859,11 @@ opaque_pass :: proc(r: ^Renderer, diffuse_override: [4]f32 = {1, 1, 1, 1}) {
 		&(r._frag_frame_ubo),
 		size_of(Frag_Frame_UBO),
 	)
+}
 
+opaque_pass :: proc(r: ^Renderer, diffuse_override: [4]f32 = {1, 1, 1, 1}) {
+	if r._lens[.MAT_BATCH] == 0 do return
+	sdl.BindGPUGraphicsPipeline(r._render_pass, r._pbr_pipeline)
 	model: ^Model
 	first_mat_batch: {
 		first := r._draw_material_batch[0]
