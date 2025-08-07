@@ -9,6 +9,7 @@ import "core:math"
 import lal "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
+import "core:slice"
 import sdl "vendor:sdl3"
 
 GameState :: struct {
@@ -35,27 +36,20 @@ main :: proc() {
 	window := sdl.CreateWindow("buffer", 1920, 1080, {.FULLSCREEN});sdle.err(window)
 	r, err := renderer.init(gpu, window)
 	if err != nil do log.panic(err)
-	err = renderer.load_all_assets(r)
-	if err != nil do log.panic(err)
 
 	last_ticks := sdl.GetTicks()
 	s: GameState
 
-	drag_racer_idx, has_drag_racer := r.model_map["CompareNormal.glb"];assert(has_drag_racer)
-	drag_racer_model := glist.get(r.models, drag_racer_idx)
+	renderer.start_copy_pass(r)
+	drag_racer := renderer.load_gltf(r, "CompareNormal.glb")
+	light_cube := renderer.load_gltf(r, "white_light_cube.glb")
+	sun_n_floor := renderer.load_gltf(r, "sun_n_floor.glb")
+	renderer.end_copy_pass(r)
 
-	// log.infof("%v", drag_racer_model.node_map)
-	// drag_racer_node, has_drag_racer_node :=
-	// 	drag_racer_model.node_map["CompareNormal"];assert(has_drag_racer_node)
-	light_cube_idx, has_light_cube := r.model_map["white_light_cube.glb"];assert(has_light_cube)
-	sun_n_floor_idx, has_sun_n_floor := r.model_map["sun_n_floor.glb"];assert(has_sun_n_floor)
 	sun_idx: u32
 	floor_idx: u32
-	{
-		model := glist.get(r.models, sun_n_floor_idx)
-		sun_idx = model.node_map["Sphere"]
-		floor_idx = model.node_map["Cube"]
-	}
+	sun_idx, ok = renderer.get_node(sun_n_floor, "Sphere");assert(ok)
+	floor_idx, ok = renderer.get_node(sun_n_floor, "Cube");assert(ok)
 
 	r.cam.pos.y = 1
 	r.cam.pos.z = 1
@@ -95,13 +89,13 @@ main :: proc() {
 			transform := lal.matrix4_from_trs([3]f32{0, 0, 0}, quat, [3]f32{1, 1, 1})
 			transform2 := lal.matrix4_from_trs([3]f32{0, 1, 0}, quat, [3]f32{1, 1, 1})
 			req := renderer.Draw_Node_Req {
-				model_idx = drag_racer_idx,
+				model     = &drag_racer,
 				transform = transform,
 				node_idx  = 0,
 			}
 			renderer.draw_node(r, req)
 			req2 := renderer.Draw_Node_Req {
-				model_idx = drag_racer_idx,
+				model     = &drag_racer,
 				transform = transform2,
 				node_idx  = 1,
 			}
@@ -116,12 +110,12 @@ main :: proc() {
 			transform1 := lal.matrix4_from_trs([3]f32{1, 0.7, 0}, quat, [3]f32{1, 1, 1})
 			transform2 := lal.matrix4_from_trs([3]f32{-1, 0.7, 0}, quat, [3]f32{1, 1, 1})
 			req1 := renderer.Draw_Node_Req {
-				model_idx = light_cube_idx,
+				model     = &light_cube,
 				transform = transform1,
 				node_idx  = 1,
 			}
 			req2 := renderer.Draw_Node_Req {
-				model_idx = light_cube_idx,
+				model     = &light_cube,
 				transform = transform2,
 				node_idx  = 1,
 			}
@@ -136,9 +130,9 @@ main :: proc() {
 				[3]f32{1, 1, 1},
 			)
 			floor_req := renderer.Draw_Node_Req {
-				model_idx = sun_n_floor_idx,
-				transform = floor_transform,
+				model     = &sun_n_floor,
 				node_idx  = floor_idx,
+				transform = floor_transform,
 			}
 			renderer.draw_node(r, floor_req)
 			pos := [3]f32{-0.05, 3, 0.05}
@@ -157,7 +151,9 @@ main :: proc() {
 		renderer.begin_render(r)
 		renderer.shadow_pass(r)
 		renderer.begin_screen_render_pass(r)
+		renderer.bind_pbr_bufs(r)
 		renderer.opaque_pass(r)
+		renderer.text_pass(r)
 		renderer.end_render(r)
 	}
 }

@@ -27,7 +27,7 @@ out_shader_ext :: "spv"
 texture_dir :: "textures"
 model_dir :: "models"
 model_dist_dir :: dist_dir + os.Path_Separator_String + model_dir
-font_location :: dist_dir + os.Path_Separator_String + fonts_dir
+font_dist_dir :: dist_dir + os.Path_Separator_String + fonts_dir
 
 mat4 :: matrix[4, 4]f32
 
@@ -265,9 +265,10 @@ init_pbr_text_pipe :: proc(r: ^Renderer) {
 						blend_state = {
 							src_color_blendfactor = .SRC_ALPHA,
 							dst_color_blendfactor = .ONE_MINUS_SRC_ALPHA,
-							src_alpha_blendfactor = .SRC_ALPHA,
+							src_alpha_blendfactor = .SRC_ALPHA_SATURATE,
 							dst_alpha_blendfactor = .DST_ALPHA,
 							color_blend_op = .ADD,
+							alpha_blend_op = .ADD,
 							enable_blend = true,
 						},
 					}),

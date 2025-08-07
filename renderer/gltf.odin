@@ -212,13 +212,7 @@ parse_light_type :: proc(light_type_str: string) -> (light_type: Light_Type) {
 	return
 }
 
-load_gltf :: proc(
-	r: ^Renderer,
-	file_name: string,
-) -> (
-	model: Model,
-	err: runtime.Allocator_Error,
-) {
+load_gltf :: proc(r: ^Renderer, file_name: string) -> (model: Model) {
 	assert(r._copy_pass != nil)
 	assert(r._copy_cmd_buf != nil)
 	temp_mem := runtime.default_temp_allocator_temp_begin()
@@ -259,10 +253,7 @@ load_gltf :: proc(
 			disk_surface: ^sdl.Surface
 			switch mem in uri {
 			case string:
-				img_path := filepath.join(
-					{dist_dir, model_dir, mem},
-					context.temp_allocator,
-				) or_return
+				img_path := filepath.join({dist_dir, model_dir, mem}, context.temp_allocator)
 				img_path_cstr := strings.clone_to_cstring(img_path, context.temp_allocator)
 				disk_surface = sdli.Load(img_path_cstr)
 			case []byte:
@@ -577,7 +568,7 @@ load_gltf :: proc(
 
 		idx_counter = 0
 		vert_counter = 0
-		model.primitives = make([]Model_Primitive, num_primitives) or_return
+		model.primitives = make([]Model_Primitive, num_primitives)
 		primitive_offset: u32 = 0
 
 		for gltf_mesh, mesh_idx in data.meshes {
@@ -815,5 +806,16 @@ generate_normals :: proc(dst: [][3]f32, idxs: []u16, pos: [][3]f32) {
 	for normal, i in dst {
 		dst[i] = lal.normalize(normal)
 	}
+}
+
+get_node :: #force_inline proc(model: Model, name: string) -> (idx: u32, ok: bool) {
+	for node, i in model.nodes {
+		if node.name == name {
+			idx = u32(i)
+			ok = true
+			return
+		}
+	}
+	return
 }
 

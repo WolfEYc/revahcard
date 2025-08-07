@@ -3,6 +3,7 @@ package renderer
 import "../lib/glist"
 import sdle "../lib/sdle"
 import "base:runtime"
+import "core:bufio"
 import "core:fmt"
 import "core:log"
 import lal "core:math/linalg"
@@ -10,6 +11,7 @@ import "core:mem"
 import os "core:os/os2"
 import "core:path/filepath"
 import "core:slice"
+import "core:strconv"
 import "core:strings"
 import sdl "vendor:sdl3"
 import sdli "vendor:sdl3/image"
@@ -67,7 +69,8 @@ PIXEL_PER_WORLD :: 0.005
 load_bitmap :: proc(r: ^Renderer, font_filename: string) -> (bm: Bitmap) {
 	temp_mem := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
-	font := load_font(r, font_filename)
+
+	font := load_font(font_filename)
 	diffuse := load_bm_png(r, font.page.file)
 	bm.name = font_filename
 	bm.material = Model_Material {
@@ -226,23 +229,192 @@ Font_Char :: struct {
 	chnl:      int,
 }
 
-load_font :: proc(r: ^Renderer, filename: string) -> (font: Font) {
+load_font :: proc(filename: string) -> (font: Font) {
+	sb: strings.Builder
+	file_path := filepath.join({font_dist_dir, filename}, context.temp_allocator)
+	f, err := os.open(file_path)
+	if err != nil do log.panicf("err in loading font=%s, reason: %v", file_path, err)
+	defer os.close(f)
+	stream := os.to_stream(f)
+	scanner: bufio.Scanner
+	bufio.scanner_init(&scanner, stream)
+	defer bufio.scanner_destroy(&scanner)
 
-
+	char_idx := 0
+	for bufio.scanner_scan(&scanner) {
+		line := bufio.scanner_text(&scanner)
+		cmd_idx := strings.index_rune(line, ' ');assert(cmd_idx > 0)
+		assert(cmd_idx < len(line) - 1)
+		cmd := line[:cmd_idx]
+		body := line[cmd_idx + 1:]
+		switch cmd {
+		case "info":
+			font.info = load_info(body)
+		case "common":
+			font.common = load_common(body)
+		case "page":
+			font.page = load_page(body)
+		case "chars":
+			font.chars = load_chars(body)
+		case "char":
+			font.chars[char_idx] = load_char(body)
+			char_idx += 1
+		}
+	}
 	return
 }
+
+load_info :: proc(body: string) -> (info: Font_Info) {
+	text := body
+	for token in strings.split_iterator(&text, " ") {
+		eq_idx := strings.index_rune(token, '=');assert(eq_idx > 0)
+		assert(eq_idx < len(token) - 1)
+		var_name := token[:eq_idx]
+		value := token[eq_idx + 1:]
+		ok: bool
+		switch var_name {
+		case "face":
+			info.face = strings.clone(value[1:len(value) - 1], context.temp_allocator)
+		case "size":
+			info.size, ok = strconv.parse_int(value);assert(ok)
+		case "bold":
+			info.bold, ok = strconv.parse_int(value);assert(ok)
+		case "italic":
+			info.italic, ok = strconv.parse_int(value);assert(ok)
+		case "charset":
+			info.charset = strings.clone(value[1:len(value) - 1], context.temp_allocator)
+		case "unicode":
+			info.unicode, ok = strconv.parse_int(value);assert(ok)
+		case "stretchH":
+			info.stretch_h, ok = strconv.parse_int(value);assert(ok)
+		case "smooth":
+			info.smooth, ok = strconv.parse_int(value);assert(ok)
+		case "aa":
+			info.aa, ok = strconv.parse_int(value);assert(ok)
+		case "padding":
+			#unroll for i in 0 ..< 4 {
+				val, ok := strings.split_iterator(&value, ",");assert(ok)
+				info.padding[i], ok = strconv.parse_int(val);assert(ok)
+			}
+		case "spacing":
+			#unroll for i in 0 ..< 2 {
+				val, ok := strings.split_iterator(&value, ",");assert(ok)
+				info.spacing[i], ok = strconv.parse_int(val);assert(ok)
+			}
+		}
+	}
+	return
+}
+load_common :: proc(body: string) -> (common: Font_Common) {
+	text := body
+	for token in strings.split_iterator(&text, " ") {
+		eq_idx := strings.index_rune(token, '=');assert(eq_idx > 0)
+		assert(eq_idx < len(token) - 1)
+		var_name := token[:eq_idx]
+		value := token[eq_idx + 1:]
+		ok: bool
+		switch var_name {
+		case "lineHeight":
+			common.line_height, ok = strconv.parse_int(value);assert(ok)
+		case "base":
+			common.base, ok = strconv.parse_int(value);assert(ok)
+		case "scaleW":
+			common.scale_w, ok = strconv.parse_int(value);assert(ok)
+		case "scaleH":
+			common.scale_h, ok = strconv.parse_int(value);assert(ok)
+		case "pages":
+			common.pages, ok = strconv.parse_int(value);assert(ok)
+		case "packed":
+			common.packed, ok = strconv.parse_int(value);assert(ok)
+		}
+	}
+	return
+}
+load_page :: proc(body: string) -> (page: Font_Page) {
+	text := body
+	for token in strings.split_iterator(&text, " ") {
+		eq_idx := strings.index_rune(token, '=');assert(eq_idx > 0)
+		assert(eq_idx < len(token) - 1)
+		var_name := token[:eq_idx]
+		value := token[eq_idx + 1:]
+		ok: bool
+		switch var_name {
+		case "id":
+			page.id, ok = strconv.parse_int(value);assert(ok)
+		case "file":
+			page.file = strings.clone(value[1:len(value) - 1], context.temp_allocator)
+			log.infof("file=%s", value)
+		}
+	}
+	return
+}
+load_chars :: proc(body: string) -> (chars: Font_Chars) {
+	text := body
+	count: int
+	ok: bool
+	for token in strings.split_iterator(&text, " ") {
+		eq_idx := strings.index_rune(token, '=');assert(eq_idx > 0)
+		assert(eq_idx < len(token) - 1)
+		var_name := token[:eq_idx]
+		value := token[eq_idx + 1:]
+		switch var_name {
+		case "count":
+			count, ok = strconv.parse_int(value);assert(ok)
+		}
+	}
+	assert(count != 0)
+	chars = make(Font_Chars, count, context.temp_allocator)
+	return
+}
+load_char :: proc(body: string) -> (char: Font_Char) {
+	text := body
+	for token in strings.split_iterator(&text, " ") {
+		eq_idx := strings.index_rune(token, '=');assert(eq_idx > 0)
+		assert(eq_idx < len(token) - 1)
+		var_name := token[:eq_idx]
+		value := token[eq_idx + 1:]
+		ok: bool
+		switch var_name {
+		case "id":
+			id_int: int
+			id_int, ok = strconv.parse_int(value);assert(ok)
+			char.id = rune(id_int)
+		case "x":
+			char.x, ok = strconv.parse_int(value);assert(ok)
+		case "y":
+			char.y, ok = strconv.parse_int(value);assert(ok)
+		case "width":
+			char.width, ok = strconv.parse_int(value);assert(ok)
+		case "height":
+			char.height, ok = strconv.parse_int(value);assert(ok)
+		case "xoffset":
+			char.x_offset, ok = strconv.parse_int(value);assert(ok)
+		case "yoffset":
+			char.y_offset, ok = strconv.parse_int(value);assert(ok)
+		case "xadvance":
+			char.x_advance, ok = strconv.parse_int(value);assert(ok)
+		case "page":
+			char.page, ok = strconv.parse_int(value);assert(ok)
+		case "chnl":
+			char.chnl, ok = strconv.parse_int(value);assert(ok)
+		}
+	}
+	return
+}
+
 
 load_bm_png :: proc(r: ^Renderer, filename: string) -> (tex: ^sdl.GPUTexture) {
 	temp_mem := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp_mem)
-	sb: strings.Builder
-	strings.builder_init_len(&sb, len(filename) + len(font_location) + 2, context.temp_allocator)
-	strings.write_string(&sb, font_location)
-	strings.write_rune(&sb, os.Path_Separator)
-	strings.write_string(&sb, filename)
-	filepath := strings.to_cstring(&sb)
+	file_path := strings.clone_to_cstring(
+		filepath.join({font_dist_dir, filename}, context.temp_allocator),
+		context.temp_allocator,
+	)
 
-	disk_surf := sdli.Load(filepath);sdle.err(disk_surf)
+	log.infof("bm_filename=%s", filename)
+	log.infof("bm_filepath=%s", file_path)
+
+	disk_surf := sdli.Load(file_path);sdle.err(disk_surf)
 	palette := sdl.GetSurfacePalette(disk_surf)
 	surf := sdl.ConvertSurfaceAndColorspace(
 		disk_surf,
@@ -352,7 +524,10 @@ sort_text_draw_call_reqs :: proc(r: ^Renderer) {
 		r._draw_text_batch[:r._lens[.TEXT_DRAW]],
 		proc(i, j: Draw_Text_Batch) -> (ordering: slice.Ordering) {
 			ordering = slice.cmp(i.bitmap, j.bitmap)
-			ordering = ordering == .Equal ? slice.cmp(i.color, j.color) : ordering
+			ordering = ordering == .Equal ? slice.cmp(i.color.r, j.color.r) : ordering
+			ordering = ordering == .Equal ? slice.cmp(i.color.g, j.color.g) : ordering
+			ordering = ordering == .Equal ? slice.cmp(i.color.b, j.color.b) : ordering
+			ordering = ordering == .Equal ? slice.cmp(i.color.a, j.color.a) : ordering
 			ordering = ordering == .Equal ? slice.cmp(i.char, j.char) : ordering
 			return
 		},
