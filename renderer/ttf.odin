@@ -100,7 +100,7 @@ load_bitmap :: proc(r: ^Renderer, font_filename: string) -> (bm: Bitmap) {
 			tbuf_name,
 		);sdle.err(ok)
 		num_chars := u32(len(font.chars))
-		verts_size := num_chars * 4 * size_of(f32) * 5 // 5 cuz only pos and uv
+		verts_size := num_chars * size_of([4][5]f32) // 5 cuz only pos and uv
 		transfer_buf := sdl.CreateGPUTransferBuffer(
 			r._gpu,
 			{usage = .UPLOAD, size = verts_size, props = tbuf_props},
@@ -116,18 +116,21 @@ load_bitmap :: proc(r: ^Renderer, font_filename: string) -> (bm: Bitmap) {
 			pos_ptr := &pos[i]
 			uv_ptr := &uv[i]
 			char_to_quad(font, char, pos_ptr, uv_ptr)
-			offset := [2]f32{f32(char.x_offset), f32(char.y_offset)}
+			offset := [2]f32{f32(char.x_offset), f32(-char.y_offset)}
 			offset *= PIXEL_PER_WORLD
+			vert_offset := i32(i) * 4
+			x_advance := f32(char.x_advance) * PIXEL_PER_WORLD
 			bm.glyphs[char.id] = Glyph {
-				vert_offset = i32(i) * 4,
+				vert_offset = vert_offset,
 				offset      = offset,
-				x_advance   = f32(char.x_advance) * PIXEL_PER_WORLD,
+				x_advance   = x_advance,
 			}
+			log.infof("char=%c offset=%d", char.id, vert_offset)
 		}
 		sdl.UnmapGPUTransferBuffer(r._gpu, transfer_buf)
 
 		pos_buf_props := sdl.CreateProperties();sdle.err(pos_buf_props)
-		pos_buf_name := fmt.ctprintf("%_pos_buf", font_filename)
+		pos_buf_name := fmt.ctprintf("%s_pos_buf", font_filename)
 		sdl.SetStringProperty(pos_buf_props, sdl.PROP_GPU_BUFFER_CREATE_NAME_STRING, pos_buf_name)
 		bm.vert_bindings[.POS].buffer = sdl.CreateGPUBuffer(
 			r._gpu,
@@ -141,7 +144,7 @@ load_bitmap :: proc(r: ^Renderer, font_filename: string) -> (bm: Bitmap) {
 		)
 
 		uv_buf_props := sdl.CreateProperties();sdle.err(uv_buf_props)
-		uv_buf_name := fmt.ctprintf("%_uv_buf", font_filename)
+		uv_buf_name := fmt.ctprintf("%s_uv_buf", font_filename)
 		sdl.SetStringProperty(uv_buf_props, sdl.PROP_GPU_BUFFER_CREATE_NAME_STRING, uv_buf_name)
 		bm.vert_bindings[.UV].buffer = sdl.CreateGPUBuffer(
 			r._gpu,
@@ -166,6 +169,7 @@ char_to_quad :: proc(font: Font, char: Font_Char, pos: ^[4][3]f32, uv: ^[4][2]f3
 		{0, offset.y, 0}, // bot left
 		{offset.x, offset.y, 0}, // bot right
 	}
+	log.infof("char=%c pos=%v", char.id, pos^)
 	scale: [2]f32 = {
 		f32(font.common.scale_w), // w
 		f32(font.common.scale_h), // h
@@ -496,6 +500,7 @@ draw_text :: proc(r: ^Renderer, req: Draw_Text_Req) {
 		glyph, ok := bitmap.glyphs[c]
 		glyph = ok ? glyph : bitmap.glyphs[' ']
 		idx := r._lens[.TEXT_DRAW]
+		log.infof("char=%c glyph.offset=%v", c, glyph.offset)
 		pos := pen + glyph.offset
 		pen_transform := lal.matrix4_from_trs(
 			[3]f32{pos.x, pos.y, 0},
@@ -551,7 +556,6 @@ copy_text_draw_reqs :: proc(r: ^Renderer) {
 }
 
 text_pass :: proc(r: ^Renderer) {
-	// TODO render da text, dont be lazy!
 	if r._lens[.TEXT_DRAW] == 0 do return
 	sdl.BindGPUGraphicsPipeline(r._render_pass, r._pbr_text_pipeline)
 	sdl.BindGPUIndexBuffer(r._render_pass, r._quad_idx_binding, ._16BIT)
@@ -573,6 +577,7 @@ text_pass :: proc(r: ^Renderer) {
 			idx := u32(i)
 			num_instances := idx - first_instance
 			text_draw_call(r, bitmap, char, first_instance, num_instances)
+			char = batch.char
 			first_instance = idx
 		}
 	}
@@ -623,11 +628,12 @@ text_draw_call :: proc(
 			bitmap.name,
 		)
 	}
+	log.infof("char=%c, glyph=%v", char, glyph)
 	// text transforms come after normal 3d objects
 	first_instace_text := r._lens[.DRAW_REQ] + first_instance
 	sdl.DrawGPUIndexedPrimitives(
 		r._render_pass,
-		4,
+		6,
 		num_instances,
 		0,
 		glyph.vert_offset,

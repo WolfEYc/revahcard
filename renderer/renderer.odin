@@ -255,7 +255,7 @@ init_pbr_text_pipe :: proc(r: ^Renderer) {
 				compare_op = .LESS,
 			},
 			rasterizer_state = {
-				cull_mode = .BACK,
+				// cull_mode = .BACK,
 				// fill_mode = .LINE,
 			},
 			target_info = {

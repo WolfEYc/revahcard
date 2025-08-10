@@ -146,6 +146,21 @@ main :: proc() {
 				pos,
 			)
 		}
+		{
+			rot := lal.QUATERNIONF32_IDENTITY
+			transform := lal.matrix4_from_trs_f32(
+				[3]f32{1, 1, 0},
+				rot,
+				[3]f32{1, 1, 1}, // scale
+			)
+			renderer.draw_text(
+				r,
+				{
+					text      = "Hello World!",
+					transform = transform, // yay
+				},
+			)
+		}
 		renderer.end_draw(r)
 
 		renderer.begin_render(r)
