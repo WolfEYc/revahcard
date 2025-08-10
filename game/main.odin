@@ -123,6 +123,22 @@ main :: proc() {
 			// renderer.draw_node(r, req2)
 		}
 		{
+			rot := lal.quaternion_from_pitch_yaw_roll_f32(3 * lal.PI / 2, 0, lal.PI / 4)
+			transform := lal.matrix4_from_trs_f32(
+			[3]f32{3, 1, 0},
+			rot,
+			[3]f32{1, 1, 1}, // scale
+			)
+			renderer.draw_text(
+				r,
+				{
+					text      = "Hello World!",
+					transform = transform, // yay
+					color     = [4]f32{1, 0, 0, 1.0},
+				},
+			)
+		}
+		{
 			floor_rot := lal.QUATERNIONF32_IDENTITY
 			floor_transform := lal.matrix4_from_trs_f32(
 				[3]f32{0, -1, 0},
@@ -144,21 +160,6 @@ main :: proc() {
 				r,
 				{dir_to_light = dir_to_light, color = [4]f32{5, 5, 5, 1}},
 				pos,
-			)
-		}
-		{
-			rot := lal.QUATERNIONF32_IDENTITY
-			transform := lal.matrix4_from_trs_f32(
-				[3]f32{1, 1, 0},
-				rot,
-				[3]f32{1, 1, 1}, // scale
-			)
-			renderer.draw_text(
-				r,
-				{
-					text      = "Hello World!",
-					transform = transform, // yay
-				},
 			)
 		}
 		renderer.end_draw(r)

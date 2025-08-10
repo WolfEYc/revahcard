@@ -16,7 +16,7 @@ import "core:strings"
 import sdl "vendor:sdl3"
 import sdli "vendor:sdl3/image"
 
-quad_idxs :: [6]u16{0, 1, 2, 1, 2, 3}
+quad_idxs :: [6]u16{1, 0, 2, 1, 2, 3}
 
 load_quad_idxs :: proc(r: ^Renderer) -> (binding: sdl.GPUBufferBinding) {
 	tbuf_props := sdl.CreateProperties();sdle.err(tbuf_props)
@@ -81,8 +81,8 @@ load_bitmap :: proc(r: ^Renderer, font_filename: string) -> (bm: Bitmap) {
 			.DIFFUSE = {texture = diffuse, sampler = r._default_text_sampler},
 			.EMISSIVE = r._default_emissive_binding,
 			.NORMAL = r._default_normal_binding,
-			.METAL_ROUGH = r._default_orm_binding,
-			.OCCLUSION = r._default_orm_binding,
+			.METAL_ROUGH = r._default_text_orm_binding,
+			.OCCLUSION = r._default_text_orm_binding,
 			.SHADOW = r._shadow_binding,
 		},
 	}
@@ -125,7 +125,6 @@ load_bitmap :: proc(r: ^Renderer, font_filename: string) -> (bm: Bitmap) {
 				offset      = offset,
 				x_advance   = x_advance,
 			}
-			log.infof("char=%c offset=%d", char.id, vert_offset)
 		}
 		sdl.UnmapGPUTransferBuffer(r._gpu, transfer_buf)
 
@@ -169,7 +168,6 @@ char_to_quad :: proc(font: Font, char: Font_Char, pos: ^[4][3]f32, uv: ^[4][2]f3
 		{0, offset.y, 0}, // bot left
 		{offset.x, offset.y, 0}, // bot right
 	}
-	log.infof("char=%c pos=%v", char.id, pos^)
 	scale: [2]f32 = {
 		f32(font.common.scale_w), // w
 		f32(font.common.scale_h), // h
@@ -347,7 +345,6 @@ load_page :: proc(body: string) -> (page: Font_Page) {
 			page.id, ok = strconv.parse_int(value);assert(ok)
 		case "file":
 			page.file = strings.clone(value[1:len(value) - 1], context.temp_allocator)
-			log.infof("file=%s", value)
 		}
 	}
 	return
@@ -500,7 +497,6 @@ draw_text :: proc(r: ^Renderer, req: Draw_Text_Req) {
 		glyph, ok := bitmap.glyphs[c]
 		glyph = ok ? glyph : bitmap.glyphs[' ']
 		idx := r._lens[.TEXT_DRAW]
-		log.infof("char=%c glyph.offset=%v", c, glyph.offset)
 		pos := pen + glyph.offset
 		pen_transform := lal.matrix4_from_trs(
 			[3]f32{pos.x, pos.y, 0},
@@ -551,7 +547,7 @@ copy_text_draw_reqs :: proc(r: ^Renderer) {
 		req := r._draw_text_batch[i]
 		idx := matrix_offset + i
 		model_matrices[idx] = r._text_draw_transforms[req.transform_idx]
-		normal_matrices[idx] = lal.inverse_transpose(model_matrices[0])
+		normal_matrices[idx] = lal.inverse_transpose(model_matrices[idx])
 	}
 }
 
@@ -628,7 +624,6 @@ text_draw_call :: proc(
 			bitmap.name,
 		)
 	}
-	log.infof("char=%c, glyph=%v", char, glyph)
 	// text transforms come after normal 3d objects
 	first_instace_text := r._lens[.DRAW_REQ] + first_instance
 	sdl.DrawGPUIndexedPrimitives(

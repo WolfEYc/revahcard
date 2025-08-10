@@ -29,7 +29,7 @@ void main() {
     vec4 world_pos = model_mat * vec4(pos, 1.0);
     gl_Position = vp * world_pos;
     out_pos = world_pos.xyz;
-    out_shadow_pos = shadow_vp * model_mat * vec4(pos, 1.0);
+    out_shadow_pos = shadow_vp * world_pos;
     out_uv = uv;
     out_uv1 = uv;
     mat4 normal_mat = ns[gl_InstanceIndex];

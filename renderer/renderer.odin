@@ -53,6 +53,7 @@ Renderer :: struct {
 	_default_diffuse_binding:  sdl.GPUTextureSamplerBinding,
 	_default_normal_binding:   sdl.GPUTextureSamplerBinding,
 	_default_orm_binding:      sdl.GPUTextureSamplerBinding,
+	_default_text_orm_binding: sdl.GPUTextureSamplerBinding,
 	_default_emissive_binding: sdl.GPUTextureSamplerBinding,
 	_default_text_material:    Model_Material,
 	_default_text_sampler:     ^sdl.GPUSampler,
@@ -255,7 +256,7 @@ init_pbr_text_pipe :: proc(r: ^Renderer) {
 				compare_op = .LESS,
 			},
 			rasterizer_state = {
-				// cull_mode = .BACK,
+				cull_mode = .BACK,
 				// fill_mode = .LINE,
 			},
 			target_info = {
@@ -407,6 +408,7 @@ init :: proc(
 	r._default_diffuse_binding = load_pixel(r, {255, 255, 255, 255})
 	r._default_normal_binding = load_pixel(r, {128, 128, 255, 255})
 	r._default_orm_binding = load_pixel(r, {255, 128, 0, 255})
+	r._default_text_orm_binding = load_pixel(r, {255, 128, 69, 255})
 	r._default_emissive_binding = load_pixel(r, {0, 0, 0, 255})
 	r._default_text_sampler = sdl.CreateGPUSampler(r._gpu, {})
 	r._quad_idx_binding = load_quad_idxs(r)
