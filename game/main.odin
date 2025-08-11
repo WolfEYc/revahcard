@@ -1,5 +1,6 @@
 package main
 
+import "../animation"
 import "../lib/glist"
 import "../lib/sdle"
 import "../renderer"
@@ -10,9 +11,11 @@ import lal "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
 import "core:slice"
+import "core:time"
 import sdl "vendor:sdl3"
 
 GameState :: struct {
+	time_s:      f32,
 	ticks:       u64,
 	ticks_ns:    u64,
 	deltatime:   f32, // in seconds
@@ -39,6 +42,7 @@ main :: proc() {
 
 	last_ticks := sdl.GetTicks()
 	s: GameState
+	s.time_s = f32(last_ticks) / 1000
 
 	renderer.start_copy_pass(r)
 	drag_racer := renderer.load_gltf(r, "CompareNormal.glb")
@@ -51,6 +55,15 @@ main :: proc() {
 	sun_idx, ok = renderer.get_node(sun_n_floor, "Sphere");assert(ok)
 	floor_idx, ok = renderer.get_node(sun_n_floor, "Cube");assert(ok)
 
+	hi := animation.Hi {
+		start   = lal.QUATERNIONF64_IDENTITY,
+		end     = lal.QUATERNIONF64_IDENTITY,
+		start_s = s.time_s,
+		end_s   = s.time_s + 5,
+		ease    = .SINE,
+	}
+	animation.interpolate(hi, s.time_s + 1)
+
 	r.cam.pos.y = 1
 	r.cam.pos.z = 1
 
@@ -60,6 +73,7 @@ main :: proc() {
 
 		new_ticks := sdl.GetTicks()
 		s.deltatime = f32(new_ticks - s.ticks) / 1000
+		s.time_s = f32(new_ticks) / 1000
 		s.ticks = new_ticks
 		s.ticks_ns = sdl.GetTicksNS()
 		// process events
@@ -134,7 +148,7 @@ main :: proc() {
 				{
 					text      = "Hello World!",
 					transform = transform, // yay
-					color     = [4]f32{1, 0, 0, 1.0},
+					color     = [4]f32{0.5, 0.1, 0.2, 1.0},
 				},
 			)
 		}
