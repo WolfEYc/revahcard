@@ -55,15 +55,6 @@ main :: proc() {
 	sun_idx, ok = renderer.get_node(sun_n_floor, "Sphere");assert(ok)
 	floor_idx, ok = renderer.get_node(sun_n_floor, "Cube");assert(ok)
 
-	hi := animation.Hi {
-		start   = lal.QUATERNIONF64_IDENTITY,
-		end     = lal.QUATERNIONF64_IDENTITY,
-		start_s = s.time_s,
-		end_s   = s.time_s + 5,
-		ease    = .SINE,
-	}
-	animation.interpolate(hi, s.time_s + 1)
-
 	r.cam.pos.y = 1
 	r.cam.pos.z = 1
 
@@ -175,6 +166,9 @@ main :: proc() {
 				{dir_to_light = dir_to_light, color = [4]f32{5, 5, 5, 1}},
 				pos,
 			)
+		}
+		{
+			// render some shapes!
 		}
 		renderer.end_draw(r)
 
