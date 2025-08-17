@@ -2,6 +2,33 @@ package renderer
 
 import "core:math"
 
+import sdl "vendor:sdl3"
+
+gen_shape :: proc(r: ^Renderer, pos_buf: sdl.GPUBufferBinding) -> (model: Model) {
+	model.materials = make([]Model_Material, 1)
+	model.materials[0] = Model_Material {
+		pipeline = r._pbr_shape_pipeline,
+		normal_scale = 1,
+		ao_strength = 0,
+		color = 1,
+		bindings = {
+			.DIFFUSE = r._default_diffuse_binding,
+			.NORMAL = r._default_normal_binding,
+			.METAL_ROUGH = r._default_orm_binding,
+			.OCCLUSION = r._default_orm_binding,
+			.EMISSIVE = r._default_emissive_binding,
+			.SHADOW = r._shadow_binding,
+		},
+	}
+	model.primitives = make([]Model_Primitive, 1)
+	model.primitives[0] = Model_Primitive {
+		vert_offset    = 0,
+		indices_offset = 0,
+		num_indices    = 0,
+	}
+
+	return
+}
 
 Circle_Gen :: struct {
 	radius:  f32,

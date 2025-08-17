@@ -36,7 +36,9 @@ Model_Material :: struct {
 	name:         Maybe(string),
 	normal_scale: f32,
 	ao_strength:  f32,
+	color:        f32,
 	bindings:     [Mat_Idx]sdl.GPUTextureSamplerBinding,
+	pipeline:     ^sdl.GPUGraphicsPipeline,
 }
 Model_Accessor :: struct {
 	buffer: u32,
@@ -457,6 +459,8 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (model: Model) {
 	// materials
 	for gltf_material, i in data.materials {
 		model_material: Model_Material
+		model_material.pipeline = r._pbr_pipeline
+		model_material.color = 1
 		model_material.name = gltf_material.name
 		base_info, has_base := gltf_material.metallic_roughness.?
 		model_material.bindings[.SHADOW] = r._shadow_binding

@@ -41,8 +41,10 @@ Renderer :: struct {
 	// render nececities
 	_gpu:                      ^sdl.GPUDevice,
 	_window:                   ^sdl.Window,
+	_gpu_texture_format:       sdl.GPUTextureFormat,
 	_pbr_pipeline:             ^sdl.GPUGraphicsPipeline,
 	_pbr_text_pipeline:        ^sdl.GPUGraphicsPipeline,
+	_pbr_shape_pipeline:       ^sdl.GPUGraphicsPipeline,
 	_shadow_pipeline:          ^sdl.GPUGraphicsPipeline,
 	_shadow_tex:               ^sdl.GPUTexture,
 	_shadow_binding:           sdl.GPUTextureSamplerBinding,
@@ -59,6 +61,7 @@ Renderer :: struct {
 	_default_text_sampler:     ^sdl.GPUSampler,
 
 	// frame gpu mem
+	_active_pipeline:          ^sdl.GPUGraphicsPipeline,
 	_frustrum_corners:         Frustrum_Corners,
 	_frustrum_center:          [3]f32,
 	_copy_cmd_buf:             ^sdl.GPUCommandBuffer,
@@ -208,7 +211,7 @@ init_pbr_pipe :: proc(r: ^Renderer) {
 		target_info = {
 			num_color_targets = 1,
 			color_target_descriptions = &(sdl.GPUColorTargetDescription {
-					format = sdl.GetGPUSwapchainTextureFormat(r._gpu, r._window),
+					format = r._gpu_texture_format,
 				}),
 			has_depth_stencil_target = true,
 			depth_stencil_format = GPU_DEPTH_TEX_FMT,
@@ -262,7 +265,7 @@ init_pbr_text_pipe :: proc(r: ^Renderer) {
 			target_info = {
 				num_color_targets = 1,
 				color_target_descriptions = &(sdl.GPUColorTargetDescription {
-						format = sdl.GetGPUSwapchainTextureFormat(r._gpu, r._window),
+						format = r._gpu_texture_format,
 						blend_state = {
 							src_color_blendfactor = .SRC_ALPHA,
 							dst_color_blendfactor = .ONE_MINUS_SRC_ALPHA,
@@ -272,6 +275,56 @@ init_pbr_text_pipe :: proc(r: ^Renderer) {
 							alpha_blend_op = .ADD,
 							enable_blend = true,
 						},
+					}),
+				has_depth_stencil_target = true,
+				depth_stencil_format = GPU_DEPTH_TEX_FMT,
+			},
+		},
+	);sdle.err(r._pbr_pipeline)
+	sdl.ReleaseGPUShader(r._gpu, vert_shader)
+	sdl.ReleaseGPUShader(r._gpu, frag_shader)
+
+	return
+}
+
+@(private)
+init_pbr_shape_pipe :: proc(r: ^Renderer) {
+	vert_shader := load_shader(
+		r._gpu,
+		"pbr_shape.spv.vert",
+		{uniform_buffers = 1, storage_buffers = 1},
+	)
+	frag_shader := load_shader(r._gpu, "pbr.spv.frag", {uniform_buffers = 2, samplers = 6})
+
+	vertex_attrs := []sdl.GPUVertexAttribute{{location = 0, buffer_slot = 0, format = .FLOAT3}}
+	vertex_buffer_descriptions := []sdl.GPUVertexBufferDescription {
+		{slot = 0, pitch = size_of([3]f32)},
+	}
+	r._pbr_pipeline = sdl.CreateGPUGraphicsPipeline(
+		r._gpu,
+		{
+			vertex_shader = vert_shader,
+			fragment_shader = frag_shader,
+			primitive_type = .TRIANGLELIST,
+			vertex_input_state = {
+				num_vertex_buffers = u32(len(vertex_buffer_descriptions)),
+				vertex_buffer_descriptions = raw_data(vertex_buffer_descriptions),
+				num_vertex_attributes = u32(len(vertex_attrs)),
+				vertex_attributes = raw_data(vertex_attrs),
+			},
+			depth_stencil_state = {
+				enable_depth_test = true,
+				enable_depth_write = true,
+				compare_op = .LESS,
+			},
+			rasterizer_state = {
+				cull_mode = .BACK,
+				// fill_mode = .LINE,
+			},
+			target_info = {
+				num_color_targets = 1,
+				color_target_descriptions = &(sdl.GPUColorTargetDescription {
+						format = r._gpu_texture_format,
 					}),
 				has_depth_stencil_target = true,
 				depth_stencil_format = GPU_DEPTH_TEX_FMT,
@@ -344,9 +397,11 @@ init :: proc(
 	r._gpu = gpu
 	r._window = window
 	ok = sdl.SetGPUSwapchainParameters(gpu, window, .SDR_LINEAR, .VSYNC);sdle.err(ok)
+	r._gpu_texture_format = sdl.GetGPUSwapchainTextureFormat(r._gpu, r._window)
 
 	init_pbr_pipe(r)
 	init_pbr_text_pipe(r)
+	init_pbr_shape_pipe(r)
 	init_shadow_pipe(r)
 
 
@@ -778,6 +833,7 @@ upload_transform_buf :: proc(r: ^Renderer) {
 
 begin_render :: proc(r: ^Renderer) {
 	assert(r._render_cmd_buf == nil)
+	r._active_pipeline = nil
 	r._render_cmd_buf = sdl.AcquireGPUCommandBuffer(r._gpu);sdle.err(r._render_cmd_buf)
 }
 
@@ -864,14 +920,13 @@ bind_pbr_bufs :: proc(r: ^Renderer) {
 	)
 }
 
-opaque_pass :: proc(r: ^Renderer, diffuse_override: [4]f32 = {1, 1, 1, 1}) {
+opaque_pass :: proc(r: ^Renderer) {
 	if r._lens[.MAT_BATCH] == 0 do return
-	sdl.BindGPUGraphicsPipeline(r._render_pass, r._pbr_pipeline)
 	model: ^Model
 	first_mat_batch: {
 		first := r._draw_material_batch[0]
 		bind_model(r, r._render_pass, first.model)
-		bind_material(r, r._render_pass, first.model, first.material_idx, diffuse_override)
+		bind_material(r, r._render_pass, first.model, first.material_idx)
 		sdl.DrawGPUIndexedPrimitivesIndirect(
 			r._render_pass,
 			r._draw_indirect_buf,
@@ -885,7 +940,7 @@ opaque_pass :: proc(r: ^Renderer, diffuse_override: [4]f32 = {1, 1, 1, 1}) {
 			model = x.model
 			bind_model(r, r._render_pass, model)
 		}
-		bind_material(r, r._render_pass, model, x.material_idx, diffuse_override)
+		bind_material(r, r._render_pass, model, x.material_idx)
 		sdl.DrawGPUIndexedPrimitivesIndirect(
 			r._render_pass,
 			r._draw_indirect_buf,
@@ -917,11 +972,14 @@ bind_material :: proc(
 	render_pass: ^sdl.GPURenderPass,
 	model: ^Model,
 	material_idx: u32,
-	diffuse_override: [4]f32,
 ) {
 	material := model.materials[material_idx]
+	if material.pipeline != r._active_pipeline {
+		sdl.BindGPUGraphicsPipeline(r._render_pass, material.pipeline)
+		r._active_pipeline = material.pipeline
+	}
 	draw_ubo := Frag_Draw_UBO {
-		diffuse_override = diffuse_override,
+		diffuse_override = material.color,
 		normal_scale     = material.normal_scale,
 		ao_strength      = material.ao_strength,
 	}
