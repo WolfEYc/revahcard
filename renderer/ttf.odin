@@ -79,11 +79,11 @@ load_bitmap :: proc(r: ^Renderer, font_filename: string) -> (bm: Bitmap) {
 		ao_strength = 0,
 		bindings = {
 			.DIFFUSE = {texture = diffuse, sampler = r._default_text_sampler},
-			.EMISSIVE = r._default_emissive_binding,
-			.NORMAL = r._default_normal_binding,
+			.EMISSIVE = r._tex_binds[.EMISSIVE],
+			.NORMAL = r._tex_binds[.NORMAL],
 			.METAL_ROUGH = r._default_text_orm_binding,
 			.OCCLUSION = r._default_text_orm_binding,
-			.SHADOW = r._shadow_binding,
+			.SHADOW = r._tex_binds[.SHADOW],
 		},
 	}
 	bm.glyphs = make(map[rune]Glyph, len(font.chars))

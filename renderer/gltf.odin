@@ -36,9 +36,8 @@ Model_Material :: struct {
 	name:         Maybe(string),
 	normal_scale: f32,
 	ao_strength:  f32,
-	color:        f32,
+	color:        [4]f32,
 	bindings:     [Mat_Idx]sdl.GPUTextureSamplerBinding,
-	pipeline:     ^sdl.GPUGraphicsPipeline,
 }
 Model_Accessor :: struct {
 	buffer: u32,
@@ -459,11 +458,10 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (model: Model) {
 	// materials
 	for gltf_material, i in data.materials {
 		model_material: Model_Material
-		model_material.pipeline = r._pbr_pipeline
 		model_material.color = 1
 		model_material.name = gltf_material.name
 		base_info, has_base := gltf_material.metallic_roughness.?
-		model_material.bindings[.SHADOW] = r._shadow_binding
+		model_material.bindings[.SHADOW] = r._tex_binds[.SHADOW]
 		if has_base {
 			diffuse_tex, has_diffuse := base_info.base_color_texture.?
 			model_material.bindings[.DIFFUSE] =
@@ -476,8 +474,8 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (model: Model) {
 				model_material.bindings[.METAL_ROUGH] = load_pixel_f32(r, pixel)
 			}
 		} else {
-			model_material.bindings[.DIFFUSE] = r._default_diffuse_binding
-			model_material.bindings[.METAL_ROUGH] = r._default_orm_binding
+			model_material.bindings[.DIFFUSE] = r._tex_binds[.DIFFUSE]
+			model_material.bindings[.METAL_ROUGH] = r._tex_binds[.METAL_ROUGH]
 		}
 
 		normal, has_normal := gltf_material.normal_texture.?
@@ -487,7 +485,7 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (model: Model) {
 			model_material.normal_scale = normal.scale
 		} else {
 			log.infof("mat=%d no normal :(", i)
-			model_material.bindings[.NORMAL] = r._default_normal_binding
+			model_material.bindings[.NORMAL] = r._tex_binds[.NORMAL]
 			model_material.normal_scale = 1.0
 		}
 		occlusion, has_occlusion := gltf_material.occlusion_texture.?
@@ -495,7 +493,7 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (model: Model) {
 			model_material.bindings[.OCCLUSION] = textures[occlusion.index]
 			model_material.ao_strength = occlusion.strength
 		} else {
-			model_material.bindings[.OCCLUSION] = r._default_orm_binding
+			model_material.bindings[.OCCLUSION] = r._tex_binds[.OCCLUSION]
 			model_material.ao_strength = 1.0
 		}
 		emissive, has_emissive := gltf_material.emissive_texture.?
@@ -727,6 +725,7 @@ load_gltf :: proc(r: ^Renderer, file_name: string) -> (model: Model) {
 		}
 		model.nodes[i] = node
 	}
+	log.infof("created model: %s with index buf: %v", file_name, model.index_buf)
 	return
 }
 

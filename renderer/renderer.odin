@@ -46,17 +46,11 @@ Renderer :: struct {
 	_pbr_text_pipeline:        ^sdl.GPUGraphicsPipeline,
 	_pbr_shape_pipeline:       ^sdl.GPUGraphicsPipeline,
 	_shadow_pipeline:          ^sdl.GPUGraphicsPipeline,
-	_shadow_tex:               ^sdl.GPUTexture,
-	_shadow_binding:           sdl.GPUTextureSamplerBinding,
-	_frame_shadow_tex:         ^sdl.GPUTexture,
 	_depth_tex:                ^sdl.GPUTexture,
 	// defaults
 	_defaut_sampler:           ^sdl.GPUSampler,
-	_default_diffuse_binding:  sdl.GPUTextureSamplerBinding,
-	_default_normal_binding:   sdl.GPUTextureSamplerBinding,
-	_default_orm_binding:      sdl.GPUTextureSamplerBinding,
+	_tex_binds:                [Mat_Idx]sdl.GPUTextureSamplerBinding,
 	_default_text_orm_binding: sdl.GPUTextureSamplerBinding,
-	_default_emissive_binding: sdl.GPUTextureSamplerBinding,
 	_default_text_material:    Model_Material,
 	_default_text_sampler:     ^sdl.GPUSampler,
 
@@ -78,7 +72,7 @@ Renderer :: struct {
 	_draw_transforms:          [MAX_RENDER_NODES]mat4,
 	_text_draw_transforms:     [MAX_RENDER_NODES]mat4,
 	_draw_material_batch:      [MAX_RENDER_NODES]Draw_Material_Batch,
-	_draw_model_batch:         [MAX_RENDER_NODES]Draw_Model_Batch,
+	_draw_model_batch:         [MAX_RENDER_NODES]Draw_Renderable_Batch,
 	_lens:                     [Frame_Buf_Len]u32,
 
 	//ttf
@@ -165,6 +159,10 @@ Transform_Storage_Mem :: struct #align (64) {
 	ns: [MAX_RENDER_NODES]mat4,
 }
 
+Renderable :: union {
+	^Shape,
+	^Model,
+}
 
 GPU_DEPTH_TEX_FMT :: sdl.GPUTextureFormat.D24_UNORM
 
@@ -300,7 +298,7 @@ init_pbr_shape_pipe :: proc(r: ^Renderer) {
 	vertex_buffer_descriptions := []sdl.GPUVertexBufferDescription {
 		{slot = 0, pitch = size_of([3]f32)},
 	}
-	r._pbr_pipeline = sdl.CreateGPUGraphicsPipeline(
+	r._pbr_shape_pipeline = sdl.CreateGPUGraphicsPipeline(
 		r._gpu,
 		{
 			vertex_shader = vert_shader,
@@ -429,7 +427,7 @@ init :: proc(
 		},
 	);sdle.err(r._depth_tex)
 
-	r._shadow_tex = sdl.CreateGPUTexture(
+	shadow_tex := sdl.CreateGPUTexture(
 		r._gpu,
 		{
 			format = GPU_DEPTH_TEX_FMT,
@@ -439,8 +437,8 @@ init :: proc(
 			layer_count_or_depth = 1,
 			num_levels = 1,
 		},
-	);sdle.err(r._shadow_tex)
-	shadow_sampler := sdl.CreateGPUSampler(
+	);sdle.err(shadow_tex)
+	shadow_samp := sdl.CreateGPUSampler(
 		r._gpu,
 		{
 			min_filter = .LINEAR,
@@ -450,21 +448,22 @@ init :: proc(
 			enable_compare = true,
 			compare_op = .LESS,
 		},
-	)
-	r._shadow_binding = sdl.GPUTextureSamplerBinding {
-		texture = r._shadow_tex,
-		sampler = shadow_sampler,
-	}
+	);sdle.err(shadow_samp)
 
 
 	// defaults
 	start_copy_pass(r)
 	r._defaut_sampler = sdl.CreateGPUSampler(r._gpu, {})
-	r._default_diffuse_binding = load_pixel(r, {255, 255, 255, 255})
-	r._default_normal_binding = load_pixel(r, {128, 128, 255, 255})
-	r._default_orm_binding = load_pixel(r, {255, 128, 0, 255})
+	orm_binding := load_pixel(r, {255, 128, 0, 255})
+	r._tex_binds = {
+		.DIFFUSE = load_pixel(r, {255, 255, 255, 255}),
+		.NORMAL = load_pixel(r, {128, 128, 255, 255}),
+		.METAL_ROUGH = orm_binding,
+		.OCCLUSION = orm_binding,
+		.EMISSIVE = load_pixel(r, {0, 0, 0, 255}),
+		.SHADOW = {texture = shadow_tex, sampler = shadow_samp},
+	}
 	r._default_text_orm_binding = load_pixel(r, {255, 128, 69, 255})
-	r._default_emissive_binding = load_pixel(r, {0, 0, 0, 255})
 	r._default_text_sampler = sdl.CreateGPUSampler(r._gpu, {})
 	r._quad_idx_binding = load_quad_idxs(r)
 	r._default_bitmap = load_bitmap(r, "jetbrains_bm.fnt")
@@ -571,26 +570,32 @@ end_copy_pass :: proc(r: ^Renderer) {
 
 Draw_Call_Mem :: [MAX_RENDER_NODES]sdl.GPUIndexedIndirectDrawCommand
 
+Pipeline_Idx :: enum {
+	GLTF,
+	SHAPE,
+}
+
 Draw_Call_Sort_Idx :: enum {
+	PIPELINE_IDX,
 	MODEL_IDX,
 	MATERIAL_IDX,
 	PRIMITIVE_IDX,
 	TRANSFORM_IDX,
 }
-Draw_Call_Req :: #simd[len(Draw_Call_Sort_Idx)]uint
+Draw_Call_Req :: [Draw_Call_Sort_Idx]uint
 Draw_Node_Req :: struct {
 	model:     ^Model,
 	node_idx:  u32,
 	transform: mat4,
 }
 Draw_Material_Batch :: struct {
-	model:        ^Model,
+	renderable:   Renderable,
 	material_idx: u32,
 	offset:       u32,
 	draw_count:   u32,
 }
-Draw_Model_Batch :: struct {
-	model:      ^Model,
+Draw_Renderable_Batch :: struct {
+	renderable: Renderable,
 	offset:     u32,
 	draw_count: u32,
 }
@@ -626,10 +631,11 @@ draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 			if r._lens[.DRAW_REQ] + r._lens[.TEXT_DRAW] == MAX_RENDER_NODES do return
 			primitive := model.primitives[i]
 			r._draw_call_reqs[r._lens[.DRAW_REQ]] = Draw_Call_Req {
-				Draw_Call_Sort_Idx.MODEL_IDX     = uint(uintptr(model)),
-				Draw_Call_Sort_Idx.MATERIAL_IDX  = uint(primitive.material),
-				Draw_Call_Sort_Idx.PRIMITIVE_IDX = uint(i),
-				Draw_Call_Sort_Idx.TRANSFORM_IDX = uint(r._lens[.DRAW_REQ]),
+				.PIPELINE_IDX  = uint(Pipeline_Idx.GLTF),
+				.MODEL_IDX     = uint(uintptr(model)),
+				.MATERIAL_IDX  = uint(primitive.material),
+				.PRIMITIVE_IDX = uint(i),
+				.TRANSFORM_IDX = uint(r._lens[.DRAW_REQ]),
 			}
 			r._draw_transforms[r._lens[.DRAW_REQ]] = req.transform
 			r._lens[.DRAW_REQ] += 1
@@ -667,17 +673,14 @@ sort_draw_call_reqs :: proc(r: ^Renderer) {
 	slice.sort_by_cmp(
 		r._draw_call_reqs[:r._lens[.DRAW_REQ]],
 		proc(i, j: Draw_Call_Req) -> (ordering: slice.Ordering) {
-			orderings_lt := simd.to_array(simd.lanes_lt(i, j))
-			orderings_gt := simd.to_array(simd.lanes_gt(i, j))
 			#unroll for idx in Draw_Call_Sort_Idx {
-				idx_ordering: slice.Ordering = cast(bool)orderings_lt[idx] ? .Less : .Equal
-				idx_ordering = cast(bool)orderings_gt[idx] ? .Greater : idx_ordering
+				idx_ordering: slice.Ordering = i[idx] < j[idx] ? .Less : .Equal
+				idx_ordering = i[idx] > j[idx] ? .Greater : idx_ordering
 				ordering = ordering == .Equal ? idx_ordering : ordering
 			}
 			return
 		},
 	)
-
 }
 
 @(private)
@@ -685,19 +688,28 @@ copy_draw_call_reqs :: proc(r: ^Renderer) {
 	// copies transforms and indirect draw calls to frame mem
 	if r._lens[.DRAW_REQ] == 0 do return
 
-	last_req := transmute([Draw_Call_Sort_Idx]uint)r._draw_call_reqs[0]
+	last_req := r._draw_call_reqs[0]
 	model_matrices := &r._frame_transfer_mem.transform.ms
 	normal_matrices := &r._frame_transfer_mem.transform.ns
 	model_matrices[0] = r._draw_transforms[last_req[.TRANSFORM_IDX]]
 	normal_matrices[0] = lal.inverse_transpose(model_matrices[0])
+	renderable: Renderable
+	model_ptr := uintptr(last_req[.MODEL_IDX])
+	switch Pipeline_Idx(last_req[.PIPELINE_IDX]) {
+	case .GLTF:
+		renderable = cast(^Model)model_ptr
+	case .SHAPE:
+		renderable = cast(^Shape)model_ptr
+	}
+
 	last_mat_batch := Draw_Material_Batch {
-		model        = cast(^Model)uintptr(last_req[.MODEL_IDX]),
+		renderable   = renderable,
 		material_idx = u32(last_req[.MATERIAL_IDX]),
 		offset       = 0,
 		draw_count   = 1,
 	}
-	last_model_batch := Draw_Model_Batch {
-		model      = cast(^Model)uintptr(last_req[.MODEL_IDX]),
+	last_model_batch := Draw_Renderable_Batch {
+		renderable = renderable,
 		offset     = 0,
 		draw_count = 1,
 	}
@@ -707,19 +719,72 @@ copy_draw_call_reqs :: proc(r: ^Renderer) {
 	end_iter := r._lens[.DRAW_REQ]
 	for i: u32 = 1; i < end_iter; i += 1 {
 		req := r._draw_call_reqs[i]
-		array_req := transmute([Draw_Call_Sort_Idx]uint)req
-		model_matrices[i] = r._draw_transforms[array_req[.TRANSFORM_IDX]]
+		model_matrices[i] = r._draw_transforms[req[.TRANSFORM_IDX]]
 		normal_matrices[i] = lal.inverse_transpose(model_matrices[i])
 
-		model_idx := array_req[.MODEL_IDX]
-		primitive_idx := array_req[.PRIMITIVE_IDX]
-		last_model_idx := last_req[.MODEL_IDX]
-		last_primitive_idx := last_req[.PRIMITIVE_IDX]
-		last_req = array_req
+		defer last_req = req
 		defer num_instances += 1
-		if model_idx == last_model_idx && primitive_idx == last_primitive_idx do continue
+		if req[.MODEL_IDX] == last_req[.MODEL_IDX] && req[.PRIMITIVE_IDX] == last_req[.PRIMITIVE_IDX] do continue
+		switch Pipeline_Idx(last_req[.PIPELINE_IDX]) {
+		case .GLTF:
+			last_model := cast(^Model)uintptr(last_req[.MODEL_IDX])
+			primitive := last_model.primitives[last_req[.PRIMITIVE_IDX]]
+			draw_call_mem[r._lens[.INDIRECT]] = sdl.GPUIndexedIndirectDrawCommand {
+				num_indices    = primitive.num_indices,
+				num_instances  = num_instances,
+				first_index    = primitive.indices_offset,
+				vertex_offset  = primitive.vert_offset,
+				first_instance = first_instance,
+			}
+		case .SHAPE:
+			last_shape := cast(^Shape)uintptr(last_req[.MODEL_IDX])
+			draw_call_mem[r._lens[.INDIRECT]] = sdl.GPUIndexedIndirectDrawCommand {
+				num_indices    = last_shape.num_indices,
+				num_instances  = num_instances,
+				first_index    = 0,
+				vertex_offset  = 0,
+				first_instance = first_instance,
+			}
+		}
+		r._lens[.INDIRECT] += 1
+		defer last_mat_batch.draw_count += 1
+		defer last_model_batch.draw_count += 1
+		first_instance = i
+		num_instances = 0
 
-		last_model := cast(^Model)uintptr(last_model_idx)
+		if req[.MODEL_IDX] == last_req[.MODEL_IDX] && u32(req[.MATERIAL_IDX]) == last_mat_batch.material_idx do continue
+		r._draw_material_batch[r._lens[.MAT_BATCH]] = last_mat_batch
+		r._lens[.MAT_BATCH] += 1
+		cur_renderable: Renderable
+		switch Pipeline_Idx(req[.PIPELINE_IDX]) {
+		case .GLTF:
+			cur_renderable = cast(^Model)uintptr(req[.MODEL_IDX])
+		case .SHAPE:
+			cur_renderable = cast(^Shape)uintptr(req[.MODEL_IDX])
+		}
+		last_mat_batch = Draw_Material_Batch {
+			renderable   = cur_renderable,
+			material_idx = u32(req[.MATERIAL_IDX]),
+			offset       = r._lens[.INDIRECT] * size_of(sdl.GPUIndexedIndirectDrawCommand),
+			draw_count   = 0,
+		}
+		if req[.MODEL_IDX] == last_req[.MODEL_IDX] do continue
+		r._draw_model_batch[r._lens[.MODEL_BATCH]] = last_model_batch
+		r._lens[.MODEL_BATCH] += 1
+		last_model_batch = Draw_Renderable_Batch {
+			renderable = cur_renderable,
+			offset     = r._lens[.INDIRECT] * size_of(sdl.GPUIndexedIndirectDrawCommand),
+			draw_count = 0,
+		}
+	}
+
+	// get stragglers
+	last_model_idx := last_req[.MODEL_IDX]
+	last_primitive_idx := last_req[.PRIMITIVE_IDX]
+	model_ptr = uintptr(last_model_idx)
+	switch Pipeline_Idx(last_req[.PIPELINE_IDX]) {
+	case .GLTF:
+		last_model := cast(^Model)model_ptr
 		primitive := last_model.primitives[last_primitive_idx]
 		draw_call_mem[r._lens[.INDIRECT]] = sdl.GPUIndexedIndirectDrawCommand {
 			num_indices    = primitive.num_indices,
@@ -728,43 +793,15 @@ copy_draw_call_reqs :: proc(r: ^Renderer) {
 			vertex_offset  = primitive.vert_offset,
 			first_instance = first_instance,
 		}
-		r._lens[.INDIRECT] += 1
-		defer last_mat_batch.draw_count += 1
-		defer last_model_batch.draw_count += 1
-		first_instance = i
-		num_instances = 0
-
-		if model_idx == last_model_idx && u32(array_req[.MATERIAL_IDX]) == last_mat_batch.material_idx do continue
-		r._draw_material_batch[r._lens[.MAT_BATCH]] = last_mat_batch
-		r._lens[.MAT_BATCH] += 1
-		model := cast(^Model)uintptr(model_idx)
-		last_mat_batch = Draw_Material_Batch {
-			model        = model,
-			material_idx = u32(array_req[.MATERIAL_IDX]),
-			offset       = r._lens[.INDIRECT] * size_of(sdl.GPUIndexedIndirectDrawCommand),
-			draw_count   = 0,
+	case .SHAPE:
+		last_shape := cast(^Shape)model_ptr
+		draw_call_mem[r._lens[.INDIRECT]] = sdl.GPUIndexedIndirectDrawCommand {
+			num_indices    = last_shape.num_indices,
+			num_instances  = num_instances,
+			first_index    = 0,
+			vertex_offset  = 0,
+			first_instance = first_instance,
 		}
-		if model_idx == last_model_idx do continue
-		r._draw_model_batch[r._lens[.MODEL_BATCH]] = last_model_batch
-		r._lens[.MODEL_BATCH] += 1
-		last_model_batch = Draw_Model_Batch {
-			model      = model,
-			offset     = r._lens[.INDIRECT] * size_of(sdl.GPUIndexedIndirectDrawCommand),
-			draw_count = 0,
-		}
-	}
-
-	// get stragglers
-	last_model_idx := last_req[Draw_Call_Sort_Idx.MODEL_IDX]
-	last_primitive_idx := last_req[Draw_Call_Sort_Idx.PRIMITIVE_IDX]
-	model := cast(^Model)uintptr(last_model_idx)
-	primitive := model.primitives[last_primitive_idx]
-	draw_call_mem[r._lens[.INDIRECT]] = sdl.GPUIndexedIndirectDrawCommand {
-		num_indices    = primitive.num_indices,
-		num_instances  = num_instances,
-		first_index    = primitive.indices_offset,
-		vertex_offset  = primitive.vert_offset,
-		first_instance = first_instance,
 	}
 	r._lens[.INDIRECT] += 1
 
@@ -876,7 +913,7 @@ shadow_pass :: proc(r: ^Renderer) {
 	if lights.num_light[.DIR] == 0 do return
 
 	depth_target_info := sdl.GPUDepthStencilTargetInfo {
-		texture     = r._shadow_tex,
+		texture     = r._tex_binds[.SHADOW].texture,
 		load_op     = .CLEAR,
 		clear_depth = 1,
 		store_op    = .STORE,
@@ -894,7 +931,7 @@ shadow_pass :: proc(r: ^Renderer) {
 	}
 	sdl.PushGPUVertexUniformData(r._render_cmd_buf, 0, &(vert_ubo), size_of(Shadow_Vert_UBO))
 	for mod_batch in r._draw_model_batch[:r._lens[.MODEL_BATCH]] {
-		bind_model_positions(r, render_pass, mod_batch.model)
+		bind_renderable_positions(r, render_pass, mod_batch.renderable)
 		sdl.DrawGPUIndexedPrimitivesIndirect(
 			render_pass,
 			r._draw_indirect_buf,
@@ -922,25 +959,48 @@ bind_pbr_bufs :: proc(r: ^Renderer) {
 
 opaque_pass :: proc(r: ^Renderer) {
 	if r._lens[.MAT_BATCH] == 0 do return
-	model: ^Model
+	renderable: Renderable
+	pipeline_idx: Pipeline_Idx
 	first_mat_batch: {
 		first := r._draw_material_batch[0]
-		bind_model(r, r._render_pass, first.model)
-		bind_material(r, r._render_pass, first.model, first.material_idx)
+		switch v in first.renderable {
+		case ^Model:
+			pipeline_idx = .GLTF
+			sdl.BindGPUGraphicsPipeline(r._render_pass, r._pbr_pipeline)
+			bind_model(r, r._render_pass, v)
+			bind_model_material(r, r._render_pass, v, first.material_idx)
+		case ^Shape:
+			pipeline_idx = .SHAPE
+			sdl.BindGPUGraphicsPipeline(r._render_pass, r._pbr_shape_pipeline)
+			bind_shape(r, r._render_pass, v)
+		}
 		sdl.DrawGPUIndexedPrimitivesIndirect(
 			r._render_pass,
 			r._draw_indirect_buf,
 			first.offset,
 			first.draw_count,
 		)
-		model = first.model
+		renderable = first.renderable
 	}
 	for x in r._draw_material_batch[1:r._lens[.MAT_BATCH]] {
-		if x.model != model {
-			model = x.model
-			bind_model(r, r._render_pass, model)
+		if x.renderable != renderable {
+			switch v in x.renderable {
+			case ^Model:
+				bind_model(r, r._render_pass, v)
+				bind_model_material(r, r._render_pass, v, x.material_idx)
+			case ^Shape:
+				if pipeline_idx == .GLTF {
+					pipeline_idx = .SHAPE
+					sdl.BindGPUGraphicsPipeline(r._render_pass, r._pbr_shape_pipeline)
+				}
+				bind_shape(r, r._render_pass, v)
+			}
+			renderable = x.renderable
 		}
-		bind_material(r, r._render_pass, model, x.material_idx)
+		model, ok := renderable.(^Model)
+		if ok {
+			bind_model_material(r, r._render_pass, model, x.material_idx)
+		}
 		sdl.DrawGPUIndexedPrimitivesIndirect(
 			r._render_pass,
 			r._draw_indirect_buf,
@@ -950,9 +1010,27 @@ opaque_pass :: proc(r: ^Renderer) {
 	}
 }
 @(private)
-bind_model_positions :: proc(r: ^Renderer, render_pass: ^sdl.GPURenderPass, model: ^Model) {
-	sdl.BindGPUVertexBuffers(render_pass, 0, &(model.vert_bufs[.POS]), 1)
-	sdl.BindGPUIndexBuffer(render_pass, model.index_buf, ._16BIT)
+bind_renderable_positions :: proc(
+	r: ^Renderer,
+	render_pass: ^sdl.GPURenderPass,
+	renderable: Renderable,
+) {
+	switch v in renderable {
+	case ^Model:
+		sdl.BindGPUVertexBuffers(render_pass, 0, &(v.vert_bufs[.POS]), 1)
+		sdl.BindGPUIndexBuffer(render_pass, v.index_buf, ._16BIT)
+	case ^Shape:
+		sdl.BindGPUVertexBuffers(render_pass, 0, &(v.pos_buf), 1)
+		sdl.BindGPUIndexBuffer(render_pass, v.index_buf, ._16BIT)
+	}
+}
+
+@(private)
+bind_shape :: proc(r: ^Renderer, render_pass: ^sdl.GPURenderPass, shape: ^Shape) {
+	sdl.BindGPUVertexBuffers(render_pass, 0, &(shape.pos_buf), 1)
+	sdl.BindGPUIndexBuffer(render_pass, shape.index_buf, ._16BIT)
+	material := &shape.material
+	bind_material(r, render_pass, material)
 }
 
 @(private)
@@ -967,17 +1045,16 @@ bind_model :: proc(r: ^Renderer, render_pass: ^sdl.GPURenderPass, model: ^Model)
 }
 
 @(private)
-bind_material :: proc(
+bind_model_material :: proc(
 	r: ^Renderer,
 	render_pass: ^sdl.GPURenderPass,
 	model: ^Model,
 	material_idx: u32,
 ) {
-	material := model.materials[material_idx]
-	if material.pipeline != r._active_pipeline {
-		sdl.BindGPUGraphicsPipeline(r._render_pass, material.pipeline)
-		r._active_pipeline = material.pipeline
-	}
+	bind_material(r, render_pass, &model.materials[material_idx])
+}
+@(private)
+bind_material :: proc(r: ^Renderer, render_pass: ^sdl.GPURenderPass, material: ^Model_Material) {
 	draw_ubo := Frag_Draw_UBO {
 		diffuse_override = material.color,
 		normal_scale     = material.normal_scale,

@@ -48,6 +48,14 @@ main :: proc() {
 	drag_racer := renderer.load_gltf(r, "CompareNormal.glb")
 	light_cube := renderer.load_gltf(r, "white_light_cube.glb")
 	sun_n_floor := renderer.load_gltf(r, "sun_n_floor.glb")
+	card := renderer.gen_rrect(
+	r,
+	{
+		size    = {1, 2},
+		radius  = 0.2,
+		quality = 64, // noice
+	},
+	)
 	renderer.end_copy_pass(r)
 
 	sun_idx: u32
@@ -169,6 +177,22 @@ main :: proc() {
 		}
 		{
 			// render some shapes!
+			rot := lal.quaternion_from_pitch_yaw_roll_f32(-lal.PI / 4, -lal.PI / 2, 0)
+			transform := lal.matrix4_from_trs_f32(
+				[3]f32{2, 2, -2},
+				rot, // yay
+				[3]f32{1, 1, 1},
+			)
+			req := renderer.Draw_Shape_Req {
+				shape     = &card,
+				transform = transform,
+			}
+			times: [3]f32 = {s.time_s, s.time_s * 2, s.time_s / 2}
+			times.r -= math.floor(times.r)
+			times.g -= math.floor(times.g)
+			times.b -= math.floor(times.b)
+			card.material.color.rgb = times
+			renderer.draw_shape(r, req)
 		}
 		renderer.end_draw(r)
 
