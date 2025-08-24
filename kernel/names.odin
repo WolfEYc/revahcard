@@ -2,21 +2,18 @@ package kernel
 
 import "base:runtime"
 import "core:bufio"
-import "core:bytes"
-import "core:encoding/csv"
 import "core:encoding/hex"
 import "core:hash"
 import "core:log"
-import mem "core:mem"
-import vmem "core:mem/virtual"
 import os "core:os/os2"
 import "core:path/filepath"
 import "core:strings"
+import "core:testing"
 
 Name_DB :: struct {
 	adj:        []string,
 	color:      []Name_Color,
-	food:       []string,
+	food:       []Food,
 	adj_file:   []byte,
 	color_file: []byte,
 	food_file:  []byte,
@@ -25,6 +22,10 @@ Name_DB :: struct {
 Name_Color :: struct {
 	name:  string,
 	color: [4]f32,
+}
+Food :: struct {
+	name:     string,
+	category: string,
 }
 
 words_dir :: "words"
@@ -49,11 +50,39 @@ hex_to_color :: proc(hex_str: string) -> (color: [4]f32, ok: bool) {
 	return
 }
 
+Color_Err_Enum :: enum {
+	NONE,
+	NAME_NOT_FIRST_COL,
+	COLOR_NOT_SECOND_COL,
+}
+Color_Err :: union #shared_nil {
+	os.Error,
+	Color_Err_Enum,
+}
+Food_Err_Enum :: enum {
+	NONE,
+	NAME_NOT_FIRST_COL,
+	CATEGORY_NOT_SECOND_COL,
+}
+Food_Err :: union #shared_nil {
+	os.Error,
+	Food_Err_Enum,
+}
+Adj_Err :: distinct os.Error
+Err_Name_Db :: union #shared_nil {
+	Color_Err,
+	Adj_Err,
+	Food_Err,
+}
 
-make_name_db :: proc() -> (db: Name_DB, err: os.Error) {
+make_name_db :: proc() -> (db: Name_DB, err: Err_Name_Db) {
+	ferr: os.Error
 	adj: {
-		db.adj_file, err = os.read_entire_file(adj_fpath, context.allocator)
-		if err != nil do return
+		db.adj_file, ferr = os.read_entire_file(adj_fpath, context.allocator)
+		if ferr != nil {
+			err = Adj_Err(ferr)
+			return
+		}
 		iter := string(db.adj_file)
 		line_count := strings.count(iter, "\n")
 		db.adj = make([]string, line_count)
@@ -64,17 +93,34 @@ make_name_db :: proc() -> (db: Name_DB, err: os.Error) {
 		}
 	}
 	colors: {
-		db.color_file, err = os.read_entire_file(color_fpath, context.allocator)
-		r: csv.Reader
-		r.trim_leading_space = true
-		r.reuse_record = true
-		r.reuse_record_buffer = true
+		db.color_file, ferr = os.read_entire_file(color_fpath, context.allocator)
+		if ferr != nil {
+			err = Color_Err(ferr)
+			return
+		}
 		s := string(db.color_file)
-		csv.reader_init_with_string(&r, s)
 		line_count := strings.count(s, "\n")
 		db.color = make([]Name_Color, line_count)
-		for row, i, err in csv.iterator_next(&r) {
-			if err != nil do return
+
+		i := 0
+		for line in strings.split_lines_iterator(&s) {
+			defer i += 1
+			split := strings.index_rune(line, ',')
+			if split == -1 || split == len(line) - 1 {
+				continue
+			}
+			row := [2]string{line[:split], line[split + 1:]}
+			if i == 0 {
+				if row[0] != "name" {
+					err = Color_Err(Color_Err_Enum.NAME_NOT_FIRST_COL)
+					return
+				}
+				if row[1] != "color" {
+					err = Color_Err(Color_Err_Enum.COLOR_NOT_SECOND_COL)
+					return
+				}
+				continue
+			}
 			name_color: Name_Color
 			hex_str := row[1]
 			ok: bool
@@ -93,64 +139,111 @@ make_name_db :: proc() -> (db: Name_DB, err: os.Error) {
 		}
 	}
 	food: {
-		db.food_file, err = os.read_entire_file(food_fpath, context.allocator)
-		if err != nil do return
-		iter := string(db.food_file)
-		line_count := strings.count(iter, "\n")
-		db.food = make([]string, line_count)
+		db.food_file, ferr = os.read_entire_file(food_fpath, context.allocator)
+		if ferr != nil {
+			err = Food_Err(ferr)
+			return
+		}
+		s := string(db.food_file)
+		line_count := strings.count(s, "\n")
+		db.food = make([]Food, line_count)
+
 		i := 0
-		for line in strings.split_lines_iterator(&iter) {
-			db.food[i] = line
-			i += 1
+		for line in strings.split_lines_iterator(&s) {
+			defer i += 1
+			split := strings.index_rune(line, ',')
+			if split == -1 || split == len(line) - 1 {
+				continue
+			}
+			row := [2]string{line[:split], line[split + 1:]}
+			if i == 0 {
+				if row[0] != "name" {
+					err = Food_Err(Food_Err_Enum.NAME_NOT_FIRST_COL)
+					return
+				}
+				if row[1] != "category" {
+					err = Food_Err(Food_Err_Enum.CATEGORY_NOT_SECOND_COL)
+					return
+				}
+				continue
+			}
+			db.food[i] = Food {
+				name     = row[0],
+				category = row[1],
+			}
 		}
 	}
 	return
 }
 
-destroy_names_db :: proc(db: Name_DB) {
+destroy_name_db :: proc(db: ^Name_DB) {
 	delete(db.adj)
 	delete(db.color)
 	delete(db.food)
 	delete(db.adj_file)
 	delete(db.color_file)
 	delete(db.food_file)
+	db^ = {}
+}
+
+@(test)
+test_make_and_delete_names_db :: proc(t: ^testing.T) {
+	db, err := make_name_db()
+	testing.expectf(t, err == nil, "err making name db, reason: %v", err)
+	destroy_name_db(&db)
 }
 
 Card_Name :: struct {
 	adj:   string,
 	color: Name_Color,
-	food:  string,
+	food:  Food,
 }
 
 card_to_name :: proc(db: Name_DB, card: Card) -> (name: Card_Name) {
 	food_data_mat := [2][4]byte {
-		transmute([4]byte)card.action.effects,
-		transmute([4]byte)card.trigger_action.effects,
+		transmute([4]byte)card.effects,
+		transmute([4]byte)card.effect_value,
 	}
 	food_data := transmute([size_of(food_data_mat)]byte)food_data_mat
 	food_hash := hash.fnv32a(food_data[:])
 	food_idx := food_hash % u32(len(db.food))
 	name.food = db.food[food_idx]
 
-	adj_data_mat := [2][4]byte {
-		transmute([4]byte)card.action.targets,
-		transmute([4]byte)card.trigger_action.targets,
-	}
+	adj_data_mat := [2][4]byte{transmute([4]byte)card.targets, transmute([4]byte)card.target_count}
 	adj_data := transmute([size_of(adj_data_mat)]byte)adj_data_mat
 	adj_hash := hash.fnv32a(adj_data[:])
 	adj_idx := adj_hash % u32(len(db.adj))
 	name.adj = db.adj[adj_idx]
 
-	color_data_mat := [4][4]byte {
-		transmute([4]byte)card.action.effect_value,
-		transmute([4]byte)card.action.target_count,
-		transmute([4]byte)card.trigger_action.effect_value,
-		transmute([4]byte)card.trigger_action.target_count,
+	color_data_mat := [2][4]byte {
+		transmute([4]byte)card.effect_value,
+		transmute([4]byte)card.target_count,
 	}
 	color_data := transmute([size_of(color_data_mat)]byte)color_data_mat
 	color_hash := hash.fnv32a(color_data[:])
 	color_idx := color_hash % u32(len(db.color))
 	name.color = db.color[color_idx]
 	return
+}
+
+@(test)
+test_card_to_name :: proc(t: ^testing.T) {
+	db, err := make_name_db()
+	testing.expectf(t, err == nil, "err making name db, reason: %v", err)
+	defer destroy_name_db(&db)
+	card := Card {
+		effects      = {.ATTACK, .SHARPEN},
+		effect_value = 3,
+		targets      = {.UP, .SELF},
+		target_count = 2,
+	}
+	name := card_to_name(db, card)
+	color := name.color.color
+	testing.expect(t, len(name.adj) > 0, "adj was empty")
+	testing.expect(t, len(name.color.name) > 0, "color name was empty")
+	color_sum := color.r + color.g + color.b
+	testing.expect(t, color_sum > 0, "color was black")
+	testing.expect(t, len(name.food.name) > 0, "food name was empty")
+	log.infof("card_name=%v", name)
 }
 

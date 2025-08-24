@@ -10,9 +10,11 @@ Effect :: enum {
 	REINFORCE,
 	SHARPEN,
 	FREEZE,
-	SEAL,
-	ACTIVATE,
-	MOVE,
+	MERGE_TO,
+	MERGE_FROM,
+	COPY_TO,
+	COPY_FROM,
+	SWAP,
 }
 
 Target :: enum {
@@ -24,20 +26,16 @@ Target :: enum {
 }
 
 Card :: struct {
-	action:         Action,
-	trigger_action: Action,
-}
-
-is_card_active :: proc(card: Card) -> bool {
-	return card.action.target_count != 0
-}
-
-Action :: struct {
 	effects:      bit_set[Effect;u32],
 	targets:      bit_set[Target;u32],
 	target_count: u32,
 	effect_value: u32,
 }
+
+is_card_active :: proc(card: Card) -> bool {
+	return card.target_count != 0
+}
+
 
 FIELD_W :: 4
 FIELD_H :: 4
@@ -47,11 +45,7 @@ Field :: [FIELD_SIZE]Card
 MAX_MOVES :: 256
 Pos :: u32
 
-Move :: struct {
-	a: Pos,
-	b: Pos,
-}
-
+Move :: [2]Pos
 Log :: sa.Small_Array(MAX_MOVES, Move)
 
 Kernel_Rand :: struct {
@@ -61,9 +55,10 @@ Kernel_Rand :: struct {
 }
 
 Kernel :: struct {
-	rng:   Kernel_Rand,
-	field: Field,
-	log:   Log,
+	rng:     Kernel_Rand,
+	field:   Field,
+	log:     Log,
+	name_db: Name_DB,
 }
 
 reset_rng :: proc(k: ^Kernel) {
@@ -93,10 +88,20 @@ Move_Error :: enum {
 	INVALID_MERGE,
 }
 
+
 move :: proc(k: ^Kernel, move: Move) -> (err: Move_Error) {
 	if k.log.len == MAX_MOVES do return .MOVE_LIMIT_REACHED
-	if move.a >= FIELD_SIZE || move.b >= FIELD_SIZE do return .OUT_OF_RANGE
+	if move.x >= FIELD_SIZE || move.y >= FIELD_SIZE do return .OUT_OF_RANGE
+	card_x := k.field[move.x]
+	card_y := k.field[move.y]
 
+	if is_card_active(card_x) && is_card_active(card_y) {
+		x_name := card_to_name(k.name_db, card_x)
+		y_name := card_to_name(k.name_db, card_x)
+		if x_name.food.category != y_name.food.category do return .INVALID_MERGE
+	}
+
+	sa.append(&k.log, move)
 	return
 }
 
