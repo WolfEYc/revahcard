@@ -31,9 +31,6 @@ Card :: struct {
 is_card_active :: proc(card: Card) -> bool {
 	return card.action.target_count != 0
 }
-card_name :: proc(card: Card) -> (name: string) {
-
-}
 
 Action :: struct {
 	effects:      bit_set[Effect;u32],
