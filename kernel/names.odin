@@ -5,6 +5,7 @@ import "core:bufio"
 import "core:encoding/hex"
 import "core:hash"
 import "core:log"
+import vmem "core:mem/virtual"
 import os "core:os/os2"
 import "core:path/filepath"
 import "core:strings"
@@ -13,19 +14,16 @@ import "core:testing"
 Name_DB :: struct {
 	adj:        []string,
 	color:      []Name_Color,
-	food:       []Food,
+	food:       []string,
 	adj_file:   []byte,
 	color_file: []byte,
 	food_file:  []byte,
+	arena:      vmem.Arena,
 }
 
 Name_Color :: struct {
 	name:  string,
 	color: [4]f32,
-}
-Food :: struct {
-	name:     string,
-	category: string,
 }
 
 words_dir :: "words"
@@ -59,15 +57,7 @@ Color_Err :: union #shared_nil {
 	os.Error,
 	Color_Err_Enum,
 }
-Food_Err_Enum :: enum {
-	NONE,
-	NAME_NOT_FIRST_COL,
-	CATEGORY_NOT_SECOND_COL,
-}
-Food_Err :: union #shared_nil {
-	os.Error,
-	Food_Err_Enum,
-}
+Food_Err :: distinct os.Error
 Adj_Err :: distinct os.Error
 Err_Name_Db :: union #shared_nil {
 	Color_Err,
@@ -76,6 +66,10 @@ Err_Name_Db :: union #shared_nil {
 }
 
 make_name_db :: proc() -> (db: Name_DB, err: Err_Name_Db) {
+	alloc_err := vmem.arena_init_growing(&db.arena);assert(alloc_err == nil)
+	default_alloc := context.allocator
+	context.allocator = vmem.arena_allocator(&db.arena)
+	defer context.allocator = default_alloc
 	ferr: os.Error
 	adj: {
 		db.adj_file, ferr = os.read_entire_file(adj_fpath, context.allocator)
@@ -144,45 +138,20 @@ make_name_db :: proc() -> (db: Name_DB, err: Err_Name_Db) {
 			err = Food_Err(ferr)
 			return
 		}
-		s := string(db.food_file)
-		line_count := strings.count(s, "\n")
-		db.food = make([]Food, line_count)
-
+		iter := string(db.food_file)
+		line_count := strings.count(iter, "\n")
+		db.food = make([]string, line_count)
 		i := 0
-		for line in strings.split_lines_iterator(&s) {
-			defer i += 1
-			split := strings.index_rune(line, ',')
-			if split == -1 || split == len(line) - 1 {
-				continue
-			}
-			row := [2]string{line[:split], line[split + 1:]}
-			if i == 0 {
-				if row[0] != "name" {
-					err = Food_Err(Food_Err_Enum.NAME_NOT_FIRST_COL)
-					return
-				}
-				if row[1] != "category" {
-					err = Food_Err(Food_Err_Enum.CATEGORY_NOT_SECOND_COL)
-					return
-				}
-				continue
-			}
-			db.food[i] = Food {
-				name     = row[0],
-				category = row[1],
-			}
+		for line in strings.split_lines_iterator(&iter) {
+			db.food[i] = line
+			i += 1
 		}
 	}
 	return
 }
 
 destroy_name_db :: proc(db: ^Name_DB) {
-	delete(db.adj)
-	delete(db.color)
-	delete(db.food)
-	delete(db.adj_file)
-	delete(db.color_file)
-	delete(db.food_file)
+	vmem.arena_destroy(&db.arena)
 	db^ = {}
 }
 
@@ -196,7 +165,7 @@ test_make_and_delete_names_db :: proc(t: ^testing.T) {
 Card_Name :: struct {
 	adj:   string,
 	color: Name_Color,
-	food:  Food,
+	food:  string,
 }
 
 card_to_name :: proc(db: Name_DB, card: Card) -> (name: Card_Name) {
@@ -234,8 +203,9 @@ test_card_to_name :: proc(t: ^testing.T) {
 	card := Card {
 		effects      = {.ATTACK, .SHARPEN},
 		effect_value = 3,
-		targets      = {.UP, .SELF},
+		targets      = {.UP, .DOWN},
 		target_count = 2,
+		hp           = 12,
 	}
 	name := card_to_name(db, card)
 	color := name.color.color
@@ -243,7 +213,7 @@ test_card_to_name :: proc(t: ^testing.T) {
 	testing.expect(t, len(name.color.name) > 0, "color name was empty")
 	color_sum := color.r + color.g + color.b
 	testing.expect(t, color_sum > 0, "color was black")
-	testing.expect(t, len(name.food.name) > 0, "food name was empty")
+	testing.expect(t, len(name.food) > 0, "food name was empty")
 	log.infof("card_name=%v", name)
 }
 

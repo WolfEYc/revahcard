@@ -6,46 +6,52 @@ import "core:math/rand"
 import "core:testing"
 
 Effect :: enum {
+	SWAP,
 	ATTACK,
-	REINFORCE,
 	SHARPEN,
 	FREEZE,
-	MERGE_TO,
-	MERGE_FROM,
-	COPY_TO,
-	COPY_FROM,
-	SWAP,
 }
 
 Target :: enum {
-	SELF,
-	UP,
-	DOWN,
 	LEFT,
 	RIGHT,
+	UP,
+	DOWN,
+}
+
+Card_Player :: enum {
+	NONE,
+	BLUE,
+	RED,
 }
 
 Card :: struct {
-	effects:      bit_set[Effect;u32],
-	targets:      bit_set[Target;u32],
-	target_count: u32,
-	effect_value: u32,
+	effects:      bit_set[Effect;u32], // food
+	targets:      bit_set[Target;u32], // category
+	target_count: i32, // adj
+	effect_value: i32, // adj
+	hp:           i32,
+	player_fl:    Card_Player,
+	frozen_turns: i32,
 }
 
 is_card_active :: proc(card: Card) -> bool {
-	return card.target_count != 0
+	return card.hp <= 0
 }
-
 
 FIELD_W :: 4
 FIELD_H :: 4
 FIELD_SIZE :: FIELD_W * FIELD_H
 Field :: [FIELD_SIZE]Card
+HAND_SIZE :: 5
+Hand :: [HAND_SIZE]Card
 
 MAX_MOVES :: 256
-Pos :: u32
 
-Move :: [2]Pos
+Move :: struct {
+	hand:  i32,
+	field: i32,
+}
 Log :: sa.Small_Array(MAX_MOVES, Move)
 
 Kernel_Rand :: struct {
@@ -57,6 +63,7 @@ Kernel_Rand :: struct {
 Kernel :: struct {
 	rng:     Kernel_Rand,
 	field:   Field,
+	hand:    Hand,
 	log:     Log,
 	name_db: Name_DB,
 }
@@ -66,42 +73,14 @@ reset_rng :: proc(k: ^Kernel) {
 	k.rng.gen = rand.default_random_generator(&k.rng.state)
 }
 
-gen_pos :: proc(k: Kernel) -> (pos: Pos) {
-	pos = rand.uint32(k.rng.gen) % FIELD_SIZE
-	return
-}
-
-@(test)
-test_random :: proc(t: ^testing.T) {
-	k: Kernel
-	k.rng.seed = 69420
-	reset_rng(&k)
-	pos1 := gen_pos(k)
-	reset_rng(&k)
-	pos2 := gen_pos(k)
-	testing.expectf(t, pos1 == pos2, "%d != %d, big sad", pos1, pos2)
-}
-
-Move_Error :: enum {
-	OUT_OF_RANGE,
-	MOVE_LIMIT_REACHED,
-	INVALID_MERGE,
-}
-
-
-move :: proc(k: ^Kernel, move: Move) -> (err: Move_Error) {
-	if k.log.len == MAX_MOVES do return .MOVE_LIMIT_REACHED
-	if move.x >= FIELD_SIZE || move.y >= FIELD_SIZE do return .OUT_OF_RANGE
-	card_x := k.field[move.x]
-	card_y := k.field[move.y]
-
-	if is_card_active(card_x) && is_card_active(card_y) {
-		x_name := card_to_name(k.name_db, card_x)
-		y_name := card_to_name(k.name_db, card_x)
-		if x_name.food.category != y_name.food.category do return .INVALID_MERGE
+reset_hand :: proc(k: ^Kernel) {
+	for _, i in k.hand {
+		k.hand[i] = gen_card(k)
 	}
+}
 
-	sa.append(&k.log, move)
+gen_card :: proc(k: ^Kernel) -> (card: Card) {
+
 	return
 }
 
