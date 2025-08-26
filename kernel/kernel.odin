@@ -79,7 +79,25 @@ reset_hand :: proc(k: ^Kernel) {
 	}
 }
 
+num_active_field :: proc(k: ^Kernel) -> (num_active: i32) {
+	for card in k.field {
+		num_active += i32(is_card_active(card))
+	}
+	return
+}
+
+remap :: proc(x: f32, low: f32, high: f32, min: f32, max: f32) -> (y: f32) {
+	y = (x - low) / (high - low)
+	y *= (max - min)
+	y += min
+	return
+}
+
+
 gen_card :: proc(k: ^Kernel) -> (card: Card) {
+	card.effects = {rand.choice_enum(Effect, k.rng.gen)}
+	card.targets = {rand.choice_enum(Target, k.rng.gen)}
+	//TODO 
 
 	return
 }
