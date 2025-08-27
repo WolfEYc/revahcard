@@ -79,6 +79,16 @@ reset_hand :: proc(k: ^Kernel) {
 	}
 }
 
+reset_field :: proc(k: ^Kernel) {
+	k.field = Field{}
+	red_pos := rand.int31_max(FIELD_SIZE, k.rng.gen)
+	blue_pos := rand.int31_max(FIELD_SIZE, k.rng.gen)
+	k.field[red_pos].hp = 30
+	k.field[red_pos].player_fl = .RED
+	k.field[blue_pos].hp = 30
+	k.field[blue_pos].player_fl = .BLUE
+}
+
 num_active_field :: proc(k: ^Kernel) -> (num_active: i32) {
 	for card in k.field {
 		num_active += i32(is_card_active(card))
@@ -95,10 +105,20 @@ remap :: proc(x: f32, low: f32, high: f32, min: f32, max: f32) -> (y: f32) {
 
 
 gen_card :: proc(k: ^Kernel) -> (card: Card) {
+	rg := context.random_generator
+	context.random_generator = k.rng.gen
+	defer context.random_generator = rg
+
 	card.effects = {rand.choice_enum(Effect, k.rng.gen)}
 	card.targets = {rand.choice_enum(Target, k.rng.gen)}
-	//TODO 
+	GEN_TARGET_COUNT_STOP :: 3
+	card.target_count = rand.int31_max(GEN_TARGET_COUNT_STOP, k.rng.gen)
+	card.target_count = max(1, card.target_count)
+	card.effect_value = GEN_TARGET_COUNT_STOP - card.target_count + 2
 
+	GEN_HP_STOP :: 3
+	card.hp = rand.int31_max(GEN_HP_STOP)
+	card.hp += 2
 	return
 }
 

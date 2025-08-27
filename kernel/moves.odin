@@ -45,6 +45,7 @@ move :: proc(k: ^Kernel, m: Move, log_move := true) -> (winner: Card_Player, err
 		card_field.target_count += card_hand.target_count
 		card_field.effect_value += card_hand.effect_value
 		card_field.effect_value *= i32(buff)
+		card_field.hp += card_hand.hp
 		card_field.frozen_turns = 0
 	} else {
 		card_field = card_hand
@@ -68,10 +69,9 @@ move :: proc(k: ^Kernel, m: Move, log_move := true) -> (winner: Card_Player, err
 
 time_machine :: proc(k: ^Kernel, move_idx: int) {
 	assert(move_idx < k.log.len)
-	k.field = Field{}
-	k.hand = Hand{}
 	reset_rng(k)
 	reset_hand(k)
+	reset_field(k)
 	for i := 0; i <= move_idx; i += 1 {
 		m := k.log.data[i]
 		move(k, m, log_move = false)
