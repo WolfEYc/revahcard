@@ -7,7 +7,7 @@ import lal "core:math/linalg"
 import sdl "vendor:sdl3"
 
 import "../renderer"
-freecam_update :: proc(s: ^GameState, r: ^renderer.Renderer) {
+freecam_update :: proc(s: ^Game) {
 	defer s.mouse_delta = {0, 0}
 	if !s.freecam do return
 	rotspeed :: 0.05
@@ -26,12 +26,12 @@ freecam_update :: proc(s: ^GameState, r: ^renderer.Renderer) {
 		cam_movedir := forward * s.movedir.y + right * s.movedir.x
 		norm_movedir := lal.normalize(cam_movedir)
 		movespeed :: 10.0
-		r.cam.pos += norm_movedir * movespeed * s.deltatime
+		s.r.cam.pos += norm_movedir * movespeed * s.deltatime
 	}
-	r.cam.target = r.cam.pos + forward
+	s.r.cam.target = s.r.cam.pos + forward
 }
 
-freecam_eventhandle :: proc(s: ^GameState, r: ^renderer.Renderer, ev: sdl.Event) {
+freecam_eventhandle :: proc(s: ^Game, ev: sdl.Event) {
 	#partial switch ev.type {
 	case .KEY_DOWN:
 		#partial switch ev.key.scancode {

@@ -43,7 +43,7 @@ FIELD_W :: 4
 FIELD_H :: 4
 FIELD_SIZE :: FIELD_W * FIELD_H
 Field :: [FIELD_SIZE]Card
-HAND_SIZE :: 5
+HAND_SIZE :: 3
 Hand :: [HAND_SIZE]Card
 
 MAX_MOVES :: 256
