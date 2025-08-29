@@ -10,9 +10,36 @@ import "core:strconv"
 import "core:math"
 import "core:strings"
 
+Render_Assets :: struct {
+	card: renderer.Shape,
+	quad: renderer.Shape,
+}
+
+load_assets :: proc(s: ^Game) {
+	renderer.start_copy_pass(s.r)
+	s.assets.card = renderer.gen_rrect(
+	s.r,
+	{
+		size    = {1, 2},
+		radius  = 0.1,
+		quality = 64, // noice
+	},
+	)
+	s.assets.quad = renderer.gen_rrect(
+	s.r,
+	{
+		size    = {20, 20},
+		radius  = 0.1,
+		quality = 4, // noice
+	},
+	)
+	renderer.end_copy_pass(s.r)
+}
+
 Render_Card :: struct {
-	pos: an.Interpolated([3]f32),
-	rot: an.Interpolated(quaternion128),
+	active: bool,
+	pos:    an.Interpolated([3]f32),
+	rot:    an.Interpolated(quaternion128),
 }
 
 Render_State :: struct {
@@ -39,10 +66,23 @@ render :: proc(s: ^Game) {
 		)
 	}
 	bg: {
-
+		transform := lal.matrix4_from_trs_f32({0, 0, -5}, lal.QUATERNIONF32_IDENTITY, 1)
+		req := renderer.Draw_Shape_Req {
+			shape     = &s.assets.quad,
+			transform = transform,
+		}
+		renderer.draw_shape(s.r, req)
 	}
 	cards: {
-
+		// field
+		for c, i in s.k.field {
+			rc := s.render_state.field[i]
+			render_card(s, rc, c)
+		}
+		for c, i in s.k.hand {
+			rc := s.render_state.hand[i]
+			render_card(s, rc, c)
+		}
 	}
 	renderer.end_draw(s.r)
 
@@ -55,32 +95,23 @@ render :: proc(s: ^Game) {
 	renderer.end_render(s.r)
 }
 
-load_assets :: proc(s: ^Game) {
-	renderer.start_copy_pass(s.r)
-	s.card = renderer.gen_rrect(
-	s.r,
-	{
-		size    = {1, 2},
-		radius  = 0.1,
-		quality = 64, // noice
-	},
-	)
-	renderer.end_copy_pass(s.r)
-}
 
 render_card :: proc(s: ^Game, rc: Render_Card, c: kernel.Card) {
+	// TODO make it so if the card active state changes,
+	// some sort of animation will happen perhaps
+
 	// card
 	card_pos := an.interpolate(rc.pos, s.time_s)
 	card_rot := an.interpolate(rc.rot, s.time_s)
 	transform := lal.matrix4_from_trs(card_pos, card_rot, 1)
 	card_req := renderer.Draw_Shape_Req {
-		shape     = &s.card,
+		shape     = &s.assets.card,
 		transform = transform,
 	}
 	renderer.draw_shape(s.r, card_req)
 
 	// card name
-	NAME_POS: [3]f32 : {-0.5, 1, 0.1}
+	NAME_POS: [3]f32 : {-0.5, 1, 0.01}
 	card_name := kernel.card_to_name(s.k.name_db, c)
 	card_name_str := strings.concatenate(
 		{card_name.adj, card_name.color.name, card_name.food},
@@ -94,7 +125,7 @@ render_card :: proc(s: ^Game, rc: Render_Card, c: kernel.Card) {
 	renderer.draw_text(s.r, name_req)
 
 	// card hp
-	HP_POS: [3]f32 : {-0.5, -1, 0.1}
+	HP_POS: [3]f32 : {-0.5, -0.9, 0.01}
 	hp_text: [10]byte
 	card_hp_str := strconv.itoa(hp_text[:], int(c.hp))
 	hp_transform := transform * lal.matrix4_from_trs(HP_POS, lal.QUATERNIONF32_IDENTITY, 1)

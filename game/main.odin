@@ -16,21 +16,22 @@ import "core:time"
 import sdl "vendor:sdl3"
 
 Game :: struct {
-	time_s:      f32,
-	ticks:       u64,
-	ticks_ns:    u64,
-	deltatime:   f32, // in seconds
-	movedir:     [2]f32,
-	mouse_delta: [2]f32,
-	rot:         [3]f32, // yaw pitch roll
-	freecam:     bool,
+	time_s:       f32,
+	ticks:        u64,
+	ticks_ns:     u64,
+	deltatime:    f32, // in seconds
+	movedir:      [2]f32,
+	mouse_delta:  [2]f32,
+	rot:          [3]f32, // yaw pitch roll
+	freecam:      bool,
 
 	// kernel
-	k:           kernel.Kernel,
+	k:            kernel.Kernel,
 
 	// render
-	r:           ^renderer.Renderer,
-	card:        renderer.Shape,
+	r:            ^renderer.Renderer,
+	assets:       Render_Assets,
+	render_state: Render_State,
 }
 
 main :: proc() {
@@ -54,8 +55,7 @@ main :: proc() {
 	last_ticks := sdl.GetTicks()
 	s.time_s = f32(last_ticks) / 1000
 
-	s.r.cam.pos.y = 1
-	s.r.cam.pos.z = 1
+	s.r.cam.pos.z = 5
 
 	load_assets(&s)
 
