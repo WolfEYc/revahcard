@@ -23,7 +23,7 @@ interpolate_normal :: proc(
 	dt = clamp(dt, 0, 1) // maybe unclamped version too?
 	dt1 := ease(x.ease, dt)
 	delta := x.end - x.start
-	lal.lerp(x.start, x.end, ELEM(dt1))
+	val = lal.lerp(x.start, x.end, ELEM_TYPE(dt1))
 	return
 }
 

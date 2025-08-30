@@ -75,13 +75,23 @@ render :: proc(s: ^Game) {
 	}
 	cards: {
 		// field
-		for c, i in s.k.field {
-			rc := s.render_state.field[i]
-			render_card(s, rc, c)
+		for &c, i in s.k.field {
+			req := Render_Card_Req {
+				card        = &c,
+				render_card = &s.render_state.field[i],
+				location    = .FIELD,
+				idx         = i,
+			}
+			render_card(s, req)
 		}
-		for c, i in s.k.hand {
-			rc := s.render_state.hand[i]
-			render_card(s, rc, c)
+		for &c, i in s.k.hand {
+			req := Render_Card_Req {
+				card        = &c,
+				render_card = &s.render_state.field[i],
+				location    = .HAND,
+				idx         = i,
+			}
+			render_card(s, req)
 		}
 	}
 	renderer.end_draw(s.r)
@@ -95,14 +105,101 @@ render :: proc(s: ^Game) {
 	renderer.end_render(s.r)
 }
 
+Card_Location :: enum {
+	FIELD,
+	HAND,
+}
 
-render_card :: proc(s: ^Game, rc: Render_Card, c: kernel.Card) {
-	// TODO make it so if the card active state changes,
-	// some sort of animation will happen perhaps
+Render_Card_Req :: struct {
+	card:        ^kernel.Card,
+	render_card: ^Render_Card,
+	location:    Card_Location,
+	idx:         int,
+}
+
+get_card_start_pos :: proc(req: Render_Card_Req) -> (pos: [3]f32) {
+	switch req.location {
+	case .FIELD:
+		FIELD_START_POS :: [3]f32{-10, 5, 0}
+		CARD_OFFSET :: [2]f32{1.2, -2.2}
+		xy_grid := kernel.to_grid(i32(req.idx))
+		xy_world := [2]f32{f32(xy_grid.x), f32(xy_grid.y)} * CARD_OFFSET
+		pos.y = FIELD_START_POS.y + xy_world.y
+		pos.xz = FIELD_START_POS.xz
+	case .HAND:
+		HAND_BASE_POS :: [3]f32{-10, -4, 0}
+		return HAND_BASE_POS
+	}
+	return
+}
+get_card_inactive_pos :: proc(req: Render_Card_Req) -> (pos: [3]f32) {
+	switch req.location {
+	case .FIELD:
+		FIELD_START_POS :: [3]f32{10, 5, 0}
+		CARD_OFFSET :: [2]f32{1.2, -2.2}
+		xy_grid := kernel.to_grid(i32(req.idx))
+		xy_world := [2]f32{f32(xy_grid.x), f32(xy_grid.y)} * CARD_OFFSET
+		pos.y = FIELD_START_POS.y + xy_world.y
+		pos.xz = FIELD_START_POS.xz
+	case .HAND:
+		HAND_BASE_POS :: [3]f32{10, -4, 0}
+		return HAND_BASE_POS
+	}
+	return
+}
+
+get_card_active_pos :: proc(req: Render_Card_Req) -> (pos: [3]f32) {
+	switch req.location {
+	case .FIELD:
+		FIELD_BASE_POS :: [3]f32{-5, 5, 0}
+		CARD_OFFSET :: [2]f32{1.2, -2.2}
+		xy_grid := kernel.to_grid(i32(req.idx))
+		xy_world := [2]f32{f32(xy_grid.x), f32(xy_grid.y)} * CARD_OFFSET
+		pos.xy = FIELD_BASE_POS.xy + xy_world
+		pos.z = FIELD_BASE_POS.z
+	case .HAND:
+		HAND_BASE_POS :: [3]f32{-3, -4, 0}
+		CARD_OFFSET :: 1.2
+		x_world := f32(req.idx) * CARD_OFFSET
+		pos.x = HAND_BASE_POS.x + x_world
+		pos.yz = HAND_BASE_POS.yz
+	}
+	return
+}
+
+get_card_inactive_rot :: proc(req: Render_Card_Req) -> (rot: quaternion128) {
+	rot = lal.quaternion_from_pitch_yaw_roll_f32(0, lal.PI + 0.001, 0)
+	return
+}
+get_card_active_rot :: proc(req: Render_Card_Req) -> (rot: quaternion128) {
+	rot = lal.quaternion_from_pitch_yaw_roll_f32(0, 0, 0)
+	return
+}
+
+render_card :: proc(s: ^Game, req: Render_Card_Req) {
+	// interpolation
+	c_active := kernel.is_card_active(req.card^)
+	if req.render_card.active != c_active {
+		req.render_card.active = c_active
+		pos: [3]f32
+		rot: quaternion128
+		if c_active {
+			pos = get_card_active_pos(req)
+			rot = get_card_active_rot(req)
+			req.render_card.pos.start = get_card_start_pos(req)
+			req.render_card.rot.start = get_card_inactive_rot(req)
+		} else {
+			pos = get_card_inactive_pos(req)
+			rot = get_card_inactive_rot(req)
+		}
+		an.set_target(&req.render_card.pos, s.time_s, pos)
+		CARD_ANIM_S :: 0.2
+		req.render_card.pos.end_s = s.time_s + CARD_ANIM_S
+	}
 
 	// card
-	card_pos := an.interpolate(rc.pos, s.time_s)
-	card_rot := an.interpolate(rc.rot, s.time_s)
+	card_pos := an.interpolate(req.render_card.pos, s.time_s)
+	card_rot := an.interpolate(req.render_card.rot, s.time_s)
 	transform := lal.matrix4_from_trs(card_pos, card_rot, 1)
 	card_req := renderer.Draw_Shape_Req {
 		shape     = &s.assets.card,
@@ -112,7 +209,7 @@ render_card :: proc(s: ^Game, rc: Render_Card, c: kernel.Card) {
 
 	// card name
 	NAME_POS: [3]f32 : {-0.5, 1, 0.01}
-	card_name := kernel.card_to_name(s.k.name_db, c)
+	card_name := kernel.card_to_name(s.k.name_db, req.card^)
 	card_name_str := strings.concatenate(
 		{card_name.adj, card_name.color.name, card_name.food},
 		context.temp_allocator,
@@ -127,7 +224,7 @@ render_card :: proc(s: ^Game, rc: Render_Card, c: kernel.Card) {
 	// card hp
 	HP_POS: [3]f32 : {-0.5, -0.9, 0.01}
 	hp_text: [10]byte
-	card_hp_str := strconv.itoa(hp_text[:], int(c.hp))
+	card_hp_str := strconv.itoa(hp_text[:], int(req.card.hp))
 	hp_transform := transform * lal.matrix4_from_trs(HP_POS, lal.QUATERNIONF32_IDENTITY, 1)
 	hp_req := renderer.Draw_Text_Req {
 		text      = card_hp_str,

@@ -68,6 +68,14 @@ Kernel :: struct {
 	name_db: Name_DB,
 }
 
+new_game :: proc(seed: u64) -> (k: Kernel) {
+	k.rng.seed = seed
+	reset_rng(&k)
+	reset_hand(&k)
+	reset_field(&k)
+	return
+}
+
 reset_rng :: proc(k: ^Kernel) {
 	k.rng.state = rand.create(k.rng.seed)
 	k.rng.gen = rand.default_random_generator(&k.rng.state)

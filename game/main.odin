@@ -27,6 +27,7 @@ Game :: struct {
 
 	// kernel
 	k:            kernel.Kernel,
+	move:         kernel.Move,
 
 	// render
 	r:            ^renderer.Renderer,
@@ -58,6 +59,8 @@ main :: proc() {
 	s.r.cam.pos.z = 5
 
 	load_assets(&s)
+	seed := rand.uint64()
+	s.k = kernel.new_game(seed)
 
 	main_loop: for {
 		temp_mem := runtime.default_temp_allocator_temp_begin()
@@ -81,6 +84,7 @@ main :: proc() {
 				}
 			}
 			freecam_eventhandle(&s, ev)
+			control_eventhandle(&s, ev)
 		}
 		// update state
 		freecam_update(&s)
