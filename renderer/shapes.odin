@@ -99,6 +99,7 @@ gen_shape :: proc(r: ^Renderer, positions: [][3]f32) -> (shape: Shape) {
 Draw_Shape_Req :: struct {
 	shape:     ^Shape,
 	transform: mat4,
+	entity_id: Entity_Id,
 }
 
 draw_shape :: proc(r: ^Renderer, req: Draw_Shape_Req) {
@@ -111,6 +112,7 @@ draw_shape :: proc(r: ^Renderer, req: Draw_Shape_Req) {
 		.PRIMITIVE_IDX = 0,
 		.TRANSFORM_IDX = uint(r._lens[.DRAW_REQ]),
 	}
+	r._draw_entity_ids[r._lens[.DRAW_REQ]] = req.entity_id
 	r._draw_transforms[r._lens[.DRAW_REQ]] = req.transform
 	r._lens[.DRAW_REQ] += 1
 }

@@ -30,6 +30,10 @@ model_dist_dir :: dist_dir + os.Path_Separator_String + model_dir
 font_dist_dir :: dist_dir + os.Path_Separator_String + fonts_dir
 
 mat4 :: matrix[4, 4]f32
+Entity_Id :: struct {
+	index: u32,
+	gen:   u32,
+}
 
 MAX_MODELS :: 4096
 MAX_RENDER_NODES :: 4096
@@ -45,8 +49,11 @@ Renderer :: struct {
 	_pbr_pipeline:             ^sdl.GPUGraphicsPipeline,
 	_pbr_text_pipeline:        ^sdl.GPUGraphicsPipeline,
 	_pbr_shape_pipeline:       ^sdl.GPUGraphicsPipeline,
+	_info_pipeline:            ^sdl.GPUGraphicsPipeline,
 	_shadow_pipeline:          ^sdl.GPUGraphicsPipeline,
 	_depth_tex:                ^sdl.GPUTexture,
+	_info_tex:                 ^sdl.GPUTexture,
+	_window_size:              [2]i32,
 	// defaults
 	_defaut_sampler:           ^sdl.GPUSampler,
 	_tex_binds:                [Mat_Idx]sdl.GPUTextureSamplerBinding,
@@ -70,10 +77,15 @@ Renderer :: struct {
 	_draw_indirect_buf:        ^sdl.GPUBuffer,
 	_draw_call_reqs:           [MAX_RENDER_NODES]Draw_Call_Req,
 	_draw_transforms:          [MAX_RENDER_NODES]mat4,
+	_draw_entity_ids:          [MAX_RENDER_NODES]Entity_Id,
 	_text_draw_transforms:     [MAX_RENDER_NODES]mat4,
 	_draw_material_batch:      [MAX_RENDER_NODES]Draw_Material_Batch,
 	_draw_model_batch:         [MAX_RENDER_NODES]Draw_Renderable_Batch,
 	_lens:                     [Frame_Buf_Len]u32,
+
+	//info
+	_info_queried:             bool,
+	_info_transfer_buf:        ^sdl.GPUTransferBuffer,
 
 	//ttf
 	_quad_idx_binding:         sdl.GPUBufferBinding,
@@ -336,6 +348,50 @@ init_pbr_shape_pipe :: proc(r: ^Renderer) {
 }
 
 @(private)
+init_info_pipe :: proc(r: ^Renderer) {
+	vert_shader := load_shader(r._gpu, "info.spv.vert", {uniform_buffers = 1, storage_buffers = 1})
+	frag_shader := load_shader(r._gpu, "info.spv.frag", {})
+
+	vertex_attrs := []sdl.GPUVertexAttribute{{location = 0, buffer_slot = 0, format = .FLOAT3}}
+	vertex_buffer_descriptions := []sdl.GPUVertexBufferDescription {
+		{slot = 0, pitch = size_of([3]f32)},
+	}
+	r._info_pipeline = sdl.CreateGPUGraphicsPipeline(
+	r._gpu,
+	{
+		vertex_shader = vert_shader,
+		fragment_shader = frag_shader,
+		primitive_type = .TRIANGLELIST,
+		vertex_input_state = {
+			num_vertex_buffers = u32(len(vertex_buffer_descriptions)),
+			vertex_buffer_descriptions = raw_data(vertex_buffer_descriptions),
+			num_vertex_attributes = u32(len(vertex_attrs)),
+			vertex_attributes = raw_data(vertex_attrs),
+		},
+		depth_stencil_state = {
+			enable_depth_test = true,
+			enable_depth_write = true,
+			compare_op = .LESS,
+		},
+		rasterizer_state = {
+			cull_mode = .BACK,
+			// fill_mode = .LINE,
+		},
+		target_info = {
+			num_color_targets = 1,
+			color_target_descriptions = &(sdl.GPUColorTargetDescription{format = .R32_INT}),
+			has_depth_stencil_target = true,
+			depth_stencil_format = GPU_DEPTH_TEX_FMT,
+		},
+	},
+	);sdle.err(r._info_pipeline)
+	sdl.ReleaseGPUShader(r._gpu, vert_shader)
+	sdl.ReleaseGPUShader(r._gpu, frag_shader)
+
+	return
+}
+
+@(private)
 init_shadow_pipe :: proc(r: ^Renderer) {
 	vert_shader := load_shader(
 		r._gpu,
@@ -401,20 +457,20 @@ init :: proc(
 	init_pbr_text_pipe(r)
 	init_pbr_shape_pipe(r)
 	init_shadow_pipe(r)
+	init_info_pipe(r)
 
 
 	// proj & view
-	win_size: [2]i32
-	ok = sdl.GetWindowSize(window, &win_size.x, &win_size.y);sdle.err(ok)
-	r.cam.aspect = f32(win_size.x) / f32(win_size.y)
+	ok = sdl.GetWindowSize(window, &r._window_size.x, &r._window_size.y);sdle.err(ok)
+	r.cam.aspect = f32(r._window_size.x) / f32(r._window_size.y)
 	r.cam.fovy = 90.0
 	r.cam.near = 0.001
 	r.cam.far = 10
 	r.cam.target = r.cam.pos
 	r.cam.target.z -= 1
 
-	w_width := u32(win_size.x)
-	w_height := u32(win_size.y)
+	w_width := u32(r._window_size.x)
+	w_height := u32(r._window_size.y)
 	r._depth_tex = sdl.CreateGPUTexture(
 		r._gpu,
 		{
@@ -426,6 +482,17 @@ init :: proc(
 			num_levels = 1,
 		},
 	);sdle.err(r._depth_tex)
+	r._info_tex = sdl.CreateGPUTexture(
+		r._gpu,
+		{
+			format = .R32_INT,
+			usage = {.COLOR_TARGET},
+			width = w_width,
+			height = w_height,
+			layer_count_or_depth = 1,
+			num_levels = 1,
+		},
+	);sdle.err(r._info_tex)
 
 	shadow_tex := sdl.CreateGPUTexture(
 		r._gpu,
@@ -587,6 +654,7 @@ Draw_Node_Req :: struct {
 	model:     ^Model,
 	node_idx:  u32,
 	transform: mat4,
+	entity_id: Entity_Id,
 }
 Draw_Material_Batch :: struct {
 	renderable:   Renderable,
@@ -603,6 +671,10 @@ Draw_Renderable_Batch :: struct {
 begin_draw :: proc(r: ^Renderer) {
 	mem.zero_item(&r._lens)
 	mem.zero_item(&r._frag_frame_ubo)
+	update_vp(r)
+}
+
+update_vp :: proc(r: ^Renderer) {
 	view := lal.matrix4_look_at_f32(r.cam.pos, r.cam.target, [3]f32{0, 1, 0})
 	proj_mat := lal.matrix4_perspective_f32(
 		lal.to_radians(r.cam.fovy),
@@ -637,6 +709,7 @@ draw_node :: proc(r: ^Renderer, req: Draw_Node_Req) {
 				.PRIMITIVE_IDX = uint(i),
 				.TRANSFORM_IDX = uint(r._lens[.DRAW_REQ]),
 			}
+			r._draw_entity_ids[r._lens[.DRAW_REQ]] = req.entity_id
 			r._draw_transforms[r._lens[.DRAW_REQ]] = req.transform
 			r._lens[.DRAW_REQ] += 1
 		}
@@ -870,6 +943,7 @@ upload_transform_buf :: proc(r: ^Renderer) {
 
 begin_render :: proc(r: ^Renderer) {
 	assert(r._render_cmd_buf == nil)
+	r._info_queried = false
 	r._active_pipeline = nil
 	r._render_cmd_buf = sdl.AcquireGPUCommandBuffer(r._gpu);sdle.err(r._render_cmd_buf)
 }
@@ -905,6 +979,57 @@ begin_screen_render_pass :: proc(r: ^Renderer) {
 		&color_target,
 		1,
 		&depth_target_info,
+	)
+}
+
+info_pass :: proc(r: ^Renderer) {
+	r._info_queried = true
+	color_target := sdl.GPUColorTargetInfo {
+		texture     = r._info_tex,
+		load_op     = .CLEAR,
+		clear_color = {-1, 0, 0, 0},
+		store_op    = .STORE,
+	}
+	depth_target_info := sdl.GPUDepthStencilTargetInfo {
+		texture     = r._depth_tex,
+		load_op     = .CLEAR,
+		clear_depth = 1,
+		store_op    = .DONT_CARE,
+	}
+	render_pass := sdl.BeginGPURenderPass(
+		r._render_cmd_buf,
+		&color_target,
+		0,
+		&depth_target_info,
+	);sdle.err(render_pass)
+	sdl.BindGPUGraphicsPipeline(render_pass, r._info_pipeline)
+	sdl.BindGPUVertexStorageBuffers(render_pass, 0, &(r._transform_gpu_buf), 1)
+	vert_ubo := Shadow_Vert_UBO {
+		vp = r._vert_ubo.shadow_vp,
+	}
+	sdl.PushGPUVertexUniformData(r._render_cmd_buf, 0, &(vert_ubo), size_of(Shadow_Vert_UBO))
+	for mod_batch in r._draw_model_batch[:r._lens[.MODEL_BATCH]] {
+		bind_renderable_positions(r, render_pass, mod_batch.renderable)
+		sdl.DrawGPUIndexedPrimitivesIndirect(
+			render_pass,
+			r._draw_indirect_buf,
+			mod_batch.offset,
+			mod_batch.draw_count,
+		)
+	}
+	sdl.EndGPURenderPass(render_pass)
+	copy_pass := sdl.BeginGPUCopyPass(r._render_cmd_buf);sdle.err(copy_pass)
+	w_width := u32(r._window_size.x)
+	w_height := u32(r._window_size.y)
+	sdl.DownloadFromGPUTexture(
+		copy_pass,
+		{
+			texture = r._info_tex,
+			w       = w_width,
+			h       = w_height, // window
+			d       = 1,
+		},
+		{transfer_buffer = r._info_transfer_buf},
 	)
 }
 
@@ -1073,8 +1198,23 @@ end_render :: proc(r: ^Renderer) {
 	assert(r._render_cmd_buf != nil)
 	assert(r._render_pass != nil)
 	sdl.EndGPURenderPass(r._render_pass)
+	//TODO determine if I should block the main thread if info, or allow delay
 	ok := sdl.SubmitGPUCommandBuffer(r._render_cmd_buf);sdle.err(ok)
 	r._render_cmd_buf = nil
 	r._render_pass = nil
+}
+
+screen_to_world :: proc(r: ^Renderer, screen_xy: [2]f32) -> (pos: [3]f32) {
+	ndc: [4]f32
+	ndc.x = 2 * (screen_xy.x / f32(r._window_size.x)) - 1
+	ndc.y = 1 - 2 * (screen_xy.y / f32(r._window_size.y))
+	ndc.z = 0
+	ndc.w = 1.0
+
+	update_vp(r)
+	inv_vp := lal.inverse(r._vert_ubo.vp)
+	world_pos := inv_vp * ndc
+	pos = world_pos.xyz / world_pos.w
+	return
 }
 

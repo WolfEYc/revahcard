@@ -33,8 +33,8 @@ get_field_card_at_screen_pos :: proc(screen_xy: [2]f32) -> (card: i32) {
 
 m1_clicked :: proc(s: ^Game, ev: sdl.Event) {
 	screen_xy: [2]f32
-	_ = sdl.GetMouseState(&screen_xy.x, &screen_xy.y)
 	hand_card := get_hand_card_at_screen_pos(screen_xy)
+	_ = sdl.GetMouseState(&screen_xy.x, &screen_xy.y)
 	field_card := get_field_card_at_screen_pos(screen_xy)
 
 	if hand_card != -1 && kernel.is_card_active(s.k.hand[hand_card]) {
