@@ -1,6 +1,7 @@
 package main
 
 import "../kernel"
+import "../lib/pool"
 import "core:log"
 import sdl "vendor:sdl3"
 
@@ -19,30 +20,25 @@ control_eventhandle :: proc(s: ^Game, ev: sdl.Event) {
 	}
 }
 
-// TODO
-get_hand_card_at_screen_pos :: proc(screen_xy: [2]f32) -> (card: i32) {
-
-	return
-}
-
-// TODO
-get_field_card_at_screen_pos :: proc(screen_xy: [2]f32) -> (card: i32) {
-
-	return
-}
 
 m1_clicked :: proc(s: ^Game, ev: sdl.Event) {
-	screen_xy: [2]f32
-	hand_card := get_hand_card_at_screen_pos(screen_xy)
-	_ = sdl.GetMouseState(&screen_xy.x, &screen_xy.y)
-	field_card := get_field_card_at_screen_pos(screen_xy)
+	clicked_entity, ok := pool.get(&s.entities, s.r.info_entity_id)
+	if !ok do return
+	switch v in clicked_entity.variant {
+	case Render_Card:
+		switch v.location {
+		case .HAND:
+			if kernel.is_card_active(s.k.hand[v.idx]) {
+				s.move.hand = v.idx
+			}
+		case .FIELD:
+			if kernel.is_card_active(s.k.field[v.idx]) {
+				s.move.field = v.idx
+			}
 
-	if hand_card != -1 && kernel.is_card_active(s.k.hand[hand_card]) {
-		s.move.hand = hand_card
+		}
 	}
-	if hand_card != -1 && kernel.is_card_active(s.k.hand[hand_card]) {
-		s.move.field = field_card
-	}
+
 	if s.move.hand != -1 && s.move.field != -1 {
 		winner, err := kernel.move(&s.k, s.move)
 		switch err {

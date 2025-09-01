@@ -3,6 +3,7 @@ package renderer
 import "../lib/glist"
 import "../lib/pool"
 import "core:container/bit_array"
+import "core:fmt"
 import sdl "vendor:sdl3"
 import sdli "vendor:sdl3/image"
 
@@ -30,14 +31,11 @@ model_dist_dir :: dist_dir + os.Path_Separator_String + model_dir
 font_dist_dir :: dist_dir + os.Path_Separator_String + fonts_dir
 
 mat4 :: matrix[4, 4]f32
-Entity_Id :: struct {
-	index: u32,
-	gen:   u32,
-}
 
 MAX_MODELS :: 4096
 MAX_RENDER_NODES :: 4096
 MAX_RENDER_LIGHTS :: 4
+INFO_BUF_SIZE :: 3
 
 Renderer :: struct {
 	cam:                       Camera,
@@ -49,10 +47,8 @@ Renderer :: struct {
 	_pbr_pipeline:             ^sdl.GPUGraphicsPipeline,
 	_pbr_text_pipeline:        ^sdl.GPUGraphicsPipeline,
 	_pbr_shape_pipeline:       ^sdl.GPUGraphicsPipeline,
-	_info_pipeline:            ^sdl.GPUGraphicsPipeline,
 	_shadow_pipeline:          ^sdl.GPUGraphicsPipeline,
 	_depth_tex:                ^sdl.GPUTexture,
-	_info_tex:                 ^sdl.GPUTexture,
 	_window_size:              [2]i32,
 	// defaults
 	_defaut_sampler:           ^sdl.GPUSampler,
@@ -77,15 +73,20 @@ Renderer :: struct {
 	_draw_indirect_buf:        ^sdl.GPUBuffer,
 	_draw_call_reqs:           [MAX_RENDER_NODES]Draw_Call_Req,
 	_draw_transforms:          [MAX_RENDER_NODES]mat4,
-	_draw_entity_ids:          [MAX_RENDER_NODES]Entity_Id,
+	_draw_entity_ids:          [MAX_RENDER_NODES]pool.Pool_Key,
 	_text_draw_transforms:     [MAX_RENDER_NODES]mat4,
 	_draw_material_batch:      [MAX_RENDER_NODES]Draw_Material_Batch,
 	_draw_model_batch:         [MAX_RENDER_NODES]Draw_Renderable_Batch,
 	_lens:                     [Frame_Buf_Len]u32,
 
 	//info
-	_info_queried:             bool,
-	_info_transfer_buf:        ^sdl.GPUTransferBuffer,
+	info_cursor:               [2]i32,
+	info_entity_id:            pool.Pool_Key,
+	_info_pipeline:            ^sdl.GPUGraphicsPipeline,
+	_info_tex:                 ^sdl.GPUTexture,
+	_info_tbufs:               [INFO_BUF_SIZE]^sdl.GPUTransferBuffer,
+	_info_fences:              [INFO_BUF_SIZE]^sdl.GPUFence,
+	_info_latest_buf:          i32,
 
 	//ttf
 	_quad_idx_binding:         sdl.GPUBufferBinding,
@@ -570,6 +571,20 @@ init :: proc(
 		);sdle.err(r._draw_indirect_buf)
 	}
 
+	info_bufs: {
+		r._info_latest_buf = -1
+		info_tbuf_size :: size_of(u32)
+		for _, i in r._info_tbufs {
+			props := sdl.CreateProperties()
+			tbuf_name := fmt.ctprintf("info_tbuf_%d", i)
+			sdl.SetStringProperty(props, sdl.PROP_GPU_TRANSFERBUFFER_CREATE_NAME_STRING, tbuf_name)
+			r._info_tbufs[i] = sdl.CreateGPUTransferBuffer(
+				r._gpu,
+				{usage = .DOWNLOAD, size = info_tbuf_size, props = props},
+			);sdle.err(r._info_tbufs[i])
+		}
+	}
+
 	return
 }
 
@@ -654,7 +669,7 @@ Draw_Node_Req :: struct {
 	model:     ^Model,
 	node_idx:  u32,
 	transform: mat4,
-	entity_id: Entity_Id,
+	entity_id: pool.Pool_Key,
 }
 Draw_Material_Batch :: struct {
 	renderable:   Renderable,
@@ -943,7 +958,6 @@ upload_transform_buf :: proc(r: ^Renderer) {
 
 begin_render :: proc(r: ^Renderer) {
 	assert(r._render_cmd_buf == nil)
-	r._info_queried = false
 	r._active_pipeline = nil
 	r._render_cmd_buf = sdl.AcquireGPUCommandBuffer(r._gpu);sdle.err(r._render_cmd_buf)
 }
@@ -982,8 +996,46 @@ begin_screen_render_pass :: proc(r: ^Renderer) {
 	)
 }
 
+poll_info :: proc(r: ^Renderer) {
+	if r._info_latest_buf < 0 do return
+	idx := r._info_latest_buf
+	instance_idx: i32 = -1
+	free_cnt := INFO_BUF_SIZE
+	for i := 0; i < INFO_BUF_SIZE; i += 1 {
+		if r._info_fences[idx] == nil || !sdl.QueryGPUFence(r._gpu, r._info_fences[idx]) {
+			idx -= 1
+			free_cnt -= 1
+			if idx < 0 do idx = INFO_BUF_SIZE - 1
+			continue
+		}
+		// ready idx!
+		instance_idx_ptr := transmute([^]i32)sdl.MapGPUTransferBuffer(
+			r._gpu,
+			r._info_tbufs[idx],
+			false,
+		)
+		instance_idx = instance_idx_ptr[0]
+		sdl.UnmapGPUTransferBuffer(r._gpu, r._info_tbufs[idx])
+		break
+	}
+	if instance_idx < 0 do return
+	// free fence and older fences
+	for i := 0; i < free_cnt; i += 1 {
+		defer {
+			idx -= 1
+			if idx < 0 do idx = INFO_BUF_SIZE - 1
+		}
+		if r._info_fences[idx] == nil do continue
+		sdl.ReleaseGPUFence(r._gpu, r._info_fences[idx])
+		r._info_fences[idx] = nil
+	}
+	r.info_entity_id = r._draw_entity_ids[instance_idx]
+}
+
 info_pass :: proc(r: ^Renderer) {
-	r._info_queried = true
+	if r.info_cursor.x < 0 || r.info_cursor.y < 0 {
+		return
+	}
 	color_target := sdl.GPUColorTargetInfo {
 		texture     = r._info_tex,
 		load_op     = .CLEAR,
@@ -1019,17 +1071,19 @@ info_pass :: proc(r: ^Renderer) {
 	}
 	sdl.EndGPURenderPass(render_pass)
 	copy_pass := sdl.BeginGPUCopyPass(r._render_cmd_buf);sdle.err(copy_pass)
-	w_width := u32(r._window_size.x)
-	w_height := u32(r._window_size.y)
+	r._info_latest_buf += 1
+	r._info_latest_buf %= INFO_BUF_SIZE
 	sdl.DownloadFromGPUTexture(
 		copy_pass,
 		{
 			texture = r._info_tex,
-			w       = w_width,
-			h       = w_height, // window
-			d       = 1,
+			x = u32(r.info_cursor.x),
+			y = u32(r.info_cursor.y),
+			w = 1,
+			h = 1,
+			d = 1,
 		},
-		{transfer_buffer = r._info_transfer_buf},
+		{transfer_buffer = r._info_tbufs[r._info_latest_buf]},
 	)
 }
 
@@ -1198,8 +1252,15 @@ end_render :: proc(r: ^Renderer) {
 	assert(r._render_cmd_buf != nil)
 	assert(r._render_pass != nil)
 	sdl.EndGPURenderPass(r._render_pass)
-	//TODO determine if I should block the main thread if info, or allow delay
-	ok := sdl.SubmitGPUCommandBuffer(r._render_cmd_buf);sdle.err(ok)
+	if r.info_cursor.x < 0 || r.info_cursor.y < 0 {
+		ok := sdl.SubmitGPUCommandBuffer(r._render_cmd_buf);sdle.err(ok)
+	} else {
+		// info pass was made
+		assert(r._info_fences[r._info_latest_buf] == nil)
+		r._info_fences[r._info_latest_buf] = sdl.SubmitGPUCommandBufferAndAcquireFence(
+			r._render_cmd_buf,
+		);sdle.err(r._info_fences[r._info_latest_buf])
+	}
 	r._render_cmd_buf = nil
 	r._render_pass = nil
 }

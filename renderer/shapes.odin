@@ -2,6 +2,7 @@ package renderer
 
 import "core:math"
 
+import "../lib/pool"
 import "../lib/sdle"
 import "base:runtime"
 import "core:log"
@@ -99,7 +100,7 @@ gen_shape :: proc(r: ^Renderer, positions: [][3]f32) -> (shape: Shape) {
 Draw_Shape_Req :: struct {
 	shape:     ^Shape,
 	transform: mat4,
-	entity_id: Entity_Id,
+	entity_id: pool.Pool_Key,
 }
 
 draw_shape :: proc(r: ^Renderer, req: Draw_Shape_Req) {

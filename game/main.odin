@@ -3,6 +3,7 @@ package main
 import "../animation"
 import "../kernel"
 import "../lib/glist"
+import "../lib/pool"
 import "../lib/sdle"
 import "../renderer"
 import "base:runtime"
@@ -33,6 +34,7 @@ Game :: struct {
 	r:            ^renderer.Renderer,
 	assets:       Render_Assets,
 	render_state: Render_State,
+	entities:     pool.Pool(Entity),
 }
 
 main :: proc() {
@@ -65,6 +67,7 @@ main :: proc() {
 	main_loop: for {
 		temp_mem := runtime.default_temp_allocator_temp_begin()
 		defer runtime.default_temp_allocator_temp_end(temp_mem)
+		pool.flush_inserts(&s.entities)
 
 		new_ticks := sdl.GetTicks()
 		s.deltatime = f32(new_ticks - s.ticks) / 1000
@@ -88,7 +91,15 @@ main :: proc() {
 		}
 		// update state
 		freecam_update(&s)
+		// update cursor
+		cursor: [2]f32
+		_ = sdl.GetMouseState(&cursor.x, &cursor.y)
+		s.r.info_cursor.x = i32(cursor.x)
+		s.r.info_cursor.y = i32(cursor.y)
+
+		// TODO test info system
 		render(&s)
+		flush_entities(&s)
 	}
 }
 
