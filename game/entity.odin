@@ -4,7 +4,7 @@ import "../lib/pool"
 
 
 EType :: union {
-	Render_Card,
+	^Render_Card,
 }
 
 Entity :: struct {

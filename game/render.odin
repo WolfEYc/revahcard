@@ -36,31 +36,32 @@ load_assets :: proc(s: ^Game) {
 	},
 	)
 	renderer.end_copy_pass(s.r)
-	for _, i in s.render_state.field {
-		rc := Render_Card {
+	for i in 0 ..< kernel.FIELD_SIZE {
+		s.render_state.mem[i] = Render_Card {
 			location = .FIELD,
 			idx      = i32(i),
 		}
 		name := fmt.aprintf("render_card_field_%d", i)
 		entity := Entity {
 			name    = name,
-			variant = rc,
+			variant = &s.render_state.mem[i],
 		}
 		insert_entity(s, &entity)
-		s.render_state.field[i] = entity.id
+		s.render_state.entities[i] = entity.id
 	}
-	for _, i in s.render_state.hand {
-		rc := Render_Card {
+	for i in 0 ..< kernel.HAND_SIZE {
+		mem_idx := i + kernel.FIELD_SIZE
+		s.render_state.mem[mem_idx] = Render_Card {
 			location = .HAND,
 			idx      = i32(i),
 		}
 		name := fmt.aprintf("render_card_hand_%d", i)
 		entity := Entity {
 			name    = name,
-			variant = rc,
+			variant = &s.render_state.mem[mem_idx],
 		}
 		insert_entity(s, &entity)
-		s.render_state.hand[i] = entity.id
+		s.render_state.entities[mem_idx] = entity.id
 	}
 }
 
@@ -72,9 +73,11 @@ Render_Card :: struct {
 	idx:      i32,
 }
 
+NUM_CARDS :: kernel.FIELD_SIZE + kernel.HAND_SIZE
+
 Render_State :: struct {
-	field: [kernel.FIELD_SIZE]pool.Pool_Key,
-	hand:  [kernel.HAND_SIZE]pool.Pool_Key,
+	entities: [NUM_CARDS]pool.Pool_Key,
+	mem:      [NUM_CARDS]Render_Card,
 }
 
 render :: proc(s: ^Game) {
@@ -105,12 +108,8 @@ render :: proc(s: ^Game) {
 	}
 	cards: {
 		// field
-		for &c, i in s.k.field {
-			entity, ok := pool.get(&s.entities, s.render_state.field[i]);assert(ok)
-			render_card(s, entity)
-		}
-		for &c, i in s.k.hand {
-			entity, ok := pool.get(&s.entities, s.render_state.hand[i]);assert(ok)
+		for entity_id in s.render_state.entities {
+			entity, ok := pool.get(&s.entities, entity_id);assert(ok)
 			render_card(s, entity)
 		}
 	}
@@ -133,7 +132,7 @@ Card_Location :: enum {
 
 
 get_card_start_pos :: proc(entity: ^Entity) -> (pos: [3]f32) {
-	render_card := entity.variant.(Render_Card)
+	render_card := entity.variant.(^Render_Card)
 	switch render_card.location {
 	case .FIELD:
 		FIELD_START_POS :: [3]f32{-10, 5, 0}
@@ -149,7 +148,7 @@ get_card_start_pos :: proc(entity: ^Entity) -> (pos: [3]f32) {
 	return
 }
 get_card_inactive_pos :: proc(entity: ^Entity) -> (pos: [3]f32) {
-	render_card := entity.variant.(Render_Card)
+	render_card := entity.variant.(^Render_Card)
 	switch render_card.location {
 	case .FIELD:
 		FIELD_START_POS :: [3]f32{10, 5, 0}
@@ -166,7 +165,7 @@ get_card_inactive_pos :: proc(entity: ^Entity) -> (pos: [3]f32) {
 }
 
 get_card_active_pos :: proc(entity: ^Entity) -> (pos: [3]f32) {
-	render_card := entity.variant.(Render_Card)
+	render_card := entity.variant.(^Render_Card)
 	switch render_card.location {
 	case .FIELD:
 		FIELD_BASE_POS :: [3]f32{-5, 5, 0}
@@ -196,7 +195,7 @@ get_card_active_rot :: proc(entity: ^Entity) -> (rot: quaternion128) {
 
 render_card :: proc(s: ^Game, entity: ^Entity) {
 	// interpolation
-	render_card := entity.variant.(Render_Card)
+	render_card := entity.variant.(^Render_Card)
 	card: ^kernel.Card
 	switch render_card.location {
 	case .FIELD:

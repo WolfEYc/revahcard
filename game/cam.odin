@@ -49,7 +49,7 @@ freecam_eventhandle :: proc(s: ^Game, ev: sdl.Event) {
 		case .Z:
 			when ODIN_DEBUG {
 				s.freecam = !s.freecam
-				ok := sdl.SetWindowRelativeMouseMode(r._window, s.freecam);sdle.err(ok)
+				ok := sdl.SetWindowRelativeMouseMode(s.r._window, s.freecam);sdle.err(ok)
 			}
 		case .W:
 			if s.movedir.y == 1 {

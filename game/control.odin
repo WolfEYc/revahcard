@@ -25,7 +25,7 @@ m1_clicked :: proc(s: ^Game, ev: sdl.Event) {
 	clicked_entity, ok := pool.get(&s.entities, s.r.info_entity_id)
 	if !ok do return
 	switch v in clicked_entity.variant {
-	case Render_Card:
+	case ^Render_Card:
 		switch v.location {
 		case .HAND:
 			if kernel.is_card_active(s.k.hand[v.idx]) {
