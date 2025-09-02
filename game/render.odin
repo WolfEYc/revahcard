@@ -13,8 +13,9 @@ import "core:math"
 import "core:strings"
 
 Render_Assets :: struct {
-	card: renderer.Shape,
-	quad: renderer.Shape,
+	card:     renderer.Shape,
+	quad:     renderer.Shape,
+	controls: [Control_Type]renderer.Model,
 }
 
 load_assets :: proc(s: ^Game) {
@@ -37,31 +38,45 @@ load_assets :: proc(s: ^Game) {
 	)
 	renderer.end_copy_pass(s.r)
 	for i in 0 ..< kernel.FIELD_SIZE {
-		s.render_state.mem[i] = Render_Card {
+		s.render_state.card_mem[i] = Render_Card {
 			location = .FIELD,
 			idx      = i32(i),
 		}
 		name := fmt.aprintf("render_card_field_%d", i)
 		entity := Entity {
 			name    = name,
-			variant = &s.render_state.mem[i],
+			variant = &s.render_state.card_mem[i],
 		}
 		insert_entity(s, &entity)
-		s.render_state.entities[i] = entity.id
+		s.render_state.cards[i] = entity.id
 	}
 	for i in 0 ..< kernel.HAND_SIZE {
 		mem_idx := i + kernel.FIELD_SIZE
-		s.render_state.mem[mem_idx] = Render_Card {
+		render_card := &s.render_state.card_mem[mem_idx]
+		render_card^ = Render_Card {
 			location = .HAND,
 			idx      = i32(i),
 		}
 		name := fmt.aprintf("render_card_hand_%d", i)
 		entity := Entity {
 			name    = name,
-			variant = &s.render_state.mem[mem_idx],
+			variant = render_card,
 		}
 		insert_entity(s, &entity)
-		s.render_state.entities[mem_idx] = entity.id
+		s.render_state.cards[mem_idx] = entity.id
+	}
+	for control_type in Control_Type {
+		gltf_name := fmt.aprintf("control_%v.glb", control_type)
+		s.assets.controls[control] = renderer.load_gltf(s.r, gltf_name)
+
+		control := &s.render_state.controls_mem[control]
+		control.control_type = control_type
+		entity := Entity {
+			name    = gltf_name,
+			variant = control,
+		}
+		insert_entity(s, &entity)
+		s.render_state.controls[control] = entity.id
 	}
 }
 
@@ -73,11 +88,19 @@ Render_Card :: struct {
 	idx:      i32,
 }
 
+Control :: struct {
+	control_type: Control_Type,
+	pos:          an.Interpolated([3]f32),
+	rot:          an.Interpolated(quaternion128),
+}
+
 NUM_CARDS :: kernel.FIELD_SIZE + kernel.HAND_SIZE
 
 Render_State :: struct {
-	entities: [NUM_CARDS]pool.Pool_Key,
-	mem:      [NUM_CARDS]Render_Card,
+	cards:        [NUM_CARDS]pool.Pool_Key,
+	card_mem:     [NUM_CARDS]Render_Card,
+	controls:     [Control_Type]pool.Pool_Key,
+	controls_mem: [Control_Type]Control,
 }
 
 render :: proc(s: ^Game) {
@@ -107,21 +130,26 @@ render :: proc(s: ^Game) {
 		renderer.draw_shape(s.r, req)
 	}
 	cards: {
-		// field
-		for entity_id in s.render_state.entities {
+		for entity_id in s.render_state.cards {
 			entity, ok := pool.get(&s.entities, entity_id);assert(ok)
 			render_card(s, entity)
+		}
+	}
+	controls: {
+		for entity_id in s.render_state.controls {
+			entity, ok := pool.get(&s.entities, entity_id);assert(ok)
+			render_control(s, entity)
 		}
 	}
 	renderer.end_draw(s.r)
 
 	renderer.begin_render(s.r)
+	renderer.info_pass(s.r)
 	renderer.shadow_pass(s.r)
 	renderer.begin_screen_render_pass(s.r)
 	renderer.bind_pbr_bufs(s.r)
 	renderer.opaque_pass(s.r)
 	renderer.text_pass(s.r)
-	renderer.info_pass(s.r)
 	renderer.end_render(s.r)
 }
 
@@ -129,7 +157,6 @@ Card_Location :: enum {
 	FIELD,
 	HAND,
 }
-
 
 get_card_start_pos :: proc(entity: ^Entity) -> (pos: [3]f32) {
 	render_card := entity.variant.(^Render_Card)
@@ -163,7 +190,6 @@ get_card_inactive_pos :: proc(entity: ^Entity) -> (pos: [3]f32) {
 	}
 	return
 }
-
 get_card_active_pos :: proc(entity: ^Entity) -> (pos: [3]f32) {
 	render_card := entity.variant.(^Render_Card)
 	switch render_card.location {
@@ -183,7 +209,6 @@ get_card_active_pos :: proc(entity: ^Entity) -> (pos: [3]f32) {
 	}
 	return
 }
-
 get_card_inactive_rot :: proc(entity: ^Entity) -> (rot: quaternion128) {
 	rot = lal.quaternion_from_pitch_yaw_roll_f32(0, lal.PI + 0.001, 0)
 	return
@@ -257,5 +282,10 @@ render_card :: proc(s: ^Game, entity: ^Entity) {
 		transform = hp_transform,
 	}
 	renderer.draw_text(s.r, hp_req)
+}
+
+// TODO
+render_control :: proc(s: ^Game, entity: ^Entity) {
+
 }
 
