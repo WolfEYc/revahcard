@@ -44,6 +44,8 @@ main :: proc() {
 		sdl.SetHint(sdl.HINT_RENDER_VULKAN_DEBUG, "1")
 	}
 	s: Game
+	err: runtime.Allocator_Error
+	s.entities, err = pool.make(Entity, renderer.MAX_RENDER_NODES);assert(err == nil)
 
 	// init sdl
 	ok := sdl.Init({.VIDEO});sdle.err(ok)
@@ -51,7 +53,6 @@ main :: proc() {
 	gpu := sdl.CreateGPUDevice({.SPIRV}, true, "vulkan");sdle.err(gpu)
 	window := sdl.CreateWindow("buffer", 1920, 1080, {.FULLSCREEN});sdle.err(window)
 
-	err: runtime.Allocator_Error
 	s.r, err = renderer.init(gpu, window)
 	if err != nil do log.panic(err)
 

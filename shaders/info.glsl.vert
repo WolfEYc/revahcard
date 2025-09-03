@@ -11,10 +11,10 @@ layout(set=1, binding=0) uniform Vert_UBO {
 
 layout(location=0) in vec3 pos;
 
-layout(location=0) out int instance_idx;
+layout(location=0) flat out int instance_idx;
 
 void main() {
     gl_Position = vp * ms[gl_InstanceIndex] * vec4(pos, 1.0);    
-    instance_idx = gl_InstanceIndex
+    instance_idx = gl_InstanceIndex;
 }
 

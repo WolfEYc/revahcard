@@ -20,6 +20,7 @@ Render_Assets :: struct {
 
 load_assets :: proc(s: ^Game) {
 	renderer.start_copy_pass(s.r)
+	defer renderer.end_copy_pass(s.r)
 	s.assets.card = renderer.gen_rrect(
 	s.r,
 	{
@@ -36,7 +37,6 @@ load_assets :: proc(s: ^Game) {
 		quality = 4, // noice
 	},
 	)
-	renderer.end_copy_pass(s.r)
 	for i in 0 ..< kernel.FIELD_SIZE {
 		s.render_state.card_mem[i] = Render_Card {
 			location = .FIELD,
@@ -65,18 +65,18 @@ load_assets :: proc(s: ^Game) {
 		insert_entity(s, &entity)
 		s.render_state.cards[mem_idx] = entity.id
 	}
-	for control_type in Control_Type {
-		gltf_name := fmt.aprintf("control_%v.glb", control_type)
-		s.assets.controls[control] = renderer.load_gltf(s.r, gltf_name)
+	for ctype in Control_Type {
+		gltf_name := fmt.aprintf("control_%v.glb", ctype)
+		s.assets.controls[ctype] = renderer.load_gltf(s.r, gltf_name)
 
-		control := &s.render_state.controls_mem[control]
-		control.control_type = control_type
+		control := &s.render_state.controls_mem[ctype]
+		control.control_type = ctype
 		entity := Entity {
 			name    = gltf_name,
 			variant = control,
 		}
 		insert_entity(s, &entity)
-		s.render_state.controls[control] = entity.id
+		s.render_state.controls[ctype] = entity.id
 	}
 }
 

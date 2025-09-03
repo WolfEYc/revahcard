@@ -1,6 +1,7 @@
 package main
 
 import "../lib/pool"
+import "core:log"
 
 
 EType :: union {
@@ -15,8 +16,9 @@ Entity :: struct {
 	_marked_del: bool,
 }
 
-insert_entity :: proc(s: ^Game, e: ^Entity) {
-	key, err := pool.insert_defered(&s.entities, e^);assert(err == nil)
+insert_entity :: proc(s: ^Game, e: ^Entity, loc := #caller_location) {
+	key, err := pool.insert_defered(&s.entities, e^)
+	if err != nil do log.panicf("%v", err, location = loc)
 	e.id = key
 }
 

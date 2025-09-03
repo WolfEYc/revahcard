@@ -124,7 +124,6 @@ activate_simulate :: proc(s: ^Game, control: ^Control) {
 
 // TODO
 handle_win :: proc(s: ^Game, winner: kernel.Card_Player) {
-
-	return
+	panic("err handle win not implemented yet")
 }
 
