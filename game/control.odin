@@ -7,7 +7,6 @@ import sdl "vendor:sdl3"
 
 
 Control_Type :: enum {
-	SIMULATE,
 	SUBMIT,
 	RESIGN,
 }
@@ -37,8 +36,6 @@ m1_clicked :: proc(s: ^Game, ev: sdl.Event) {
 		switch v.control_type {
 		case .SUBMIT:
 			hold_submit(s, v)
-		case .SIMULATE:
-			hold_simulate(s, v)
 		case .RESIGN:
 			hold_resign(s, v)
 		}
@@ -56,8 +53,6 @@ m1_released :: proc(s: ^Game, ev: sdl.Event) {
 		switch v.control_type {
 		case .SUBMIT:
 			activate_submit(s, v)
-		case .SIMULATE:
-			activate_simulate(s, v)
 		case .RESIGN:
 			activate_resign(s, v)
 		}
@@ -75,6 +70,8 @@ interact_card :: proc(s: ^Game, card: ^Render_Card) {
 		if kernel.is_card_active(s.k.field[card.idx]) {
 			s.move.field = card.idx
 		}
+	case .LOG:
+	// TODO time machine
 	}
 	return
 }

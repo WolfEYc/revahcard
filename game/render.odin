@@ -5,7 +5,9 @@ import "../kernel"
 import "../lib/pool"
 import "../renderer"
 import "base:runtime"
+import sa "core:container/small_array"
 import "core:fmt"
+import "core:log"
 import lal "core:math/linalg"
 import "core:strconv"
 
@@ -65,6 +67,21 @@ load_assets :: proc(s: ^Game) {
 		insert_entity(s, &entity)
 		s.render_state.cards[mem_idx] = entity.id
 	}
+	for i in 0 ..< kernel.MAX_MOVES {
+		mem_idx := i + kernel.HAND_SIZE + kernel.FIELD_SIZE
+		render_card := &s.render_state.card_mem[mem_idx]
+		render_card^ = Render_Card {
+			location = .LOG,
+			idx      = i32(i),
+		}
+		name := fmt.aprintf("render_card_log_%d", i)
+		entity := Entity {
+			name    = name,
+			variant = render_card,
+		}
+		insert_entity(s, &entity)
+		s.render_state.cards[mem_idx] = entity.id
+	}
 	for ctype in Control_Type {
 		gltf_name := fmt.aprintf("control_%v.glb", ctype)
 		s.assets.controls[ctype] = renderer.load_gltf(s.r, gltf_name)
@@ -81,20 +98,26 @@ load_assets :: proc(s: ^Game) {
 }
 
 Render_Card :: struct {
-	active:   bool,
-	pos:      an.Interpolated([3]f32),
-	rot:      an.Interpolated(quaternion128),
-	location: Card_Location,
-	idx:      i32,
+	pos:         an.Interpolated([3]f32),
+	rot:         an.Interpolated(quaternion128),
+	location:    Card_Location,
+	idx:         i32,
+	render_data: kernel.Card,
 }
 
 Control :: struct {
 	control_type: Control_Type,
 	pos:          an.Interpolated([3]f32),
 	rot:          an.Interpolated(quaternion128),
+	hover_pos:    [3]f32,
+	hover_rot:    quaternion128,
+	submit_pos:   [3]f32,
+	submit_rot:   quaternion128,
+	standby_pos:  [3]f32,
+	standby_rot:  quaternion128,
 }
 
-NUM_CARDS :: kernel.FIELD_SIZE + kernel.HAND_SIZE
+NUM_CARDS :: kernel.FIELD_SIZE + kernel.HAND_SIZE + kernel.MAX_MOVES
 
 Render_State :: struct {
 	cards:        [NUM_CARDS]pool.Pool_Key,
@@ -156,9 +179,10 @@ render :: proc(s: ^Game) {
 Card_Location :: enum {
 	FIELD,
 	HAND,
+	LOG,
 }
 
-get_card_start_pos :: proc(entity: ^Entity) -> (pos: [3]f32) {
+get_card_start_pos :: proc(s: ^Game, entity: ^Entity) -> (pos: [3]f32) {
 	render_card := entity.variant.(^Render_Card)
 	switch render_card.location {
 	case .FIELD:
@@ -169,12 +193,15 @@ get_card_start_pos :: proc(entity: ^Entity) -> (pos: [3]f32) {
 		pos.y = FIELD_START_POS.y + xy_world.y
 		pos.xz = FIELD_START_POS.xz
 	case .HAND:
-		HAND_BASE_POS :: [3]f32{-10, -4, 0}
-		return HAND_BASE_POS
+		HAND_START_POS :: [3]f32{-10, -4, 0}
+		return HAND_START_POS
+	case .LOG:
+		LOG_BASE_POS :: [3]f32{4, 4, 0}
+		return LOG_BASE_POS
 	}
 	return
 }
-get_card_inactive_pos :: proc(entity: ^Entity) -> (pos: [3]f32) {
+get_card_inactive_pos :: proc(s: ^Game, entity: ^Entity) -> (pos: [3]f32) {
 	render_card := entity.variant.(^Render_Card)
 	switch render_card.location {
 	case .FIELD:
@@ -187,10 +214,13 @@ get_card_inactive_pos :: proc(entity: ^Entity) -> (pos: [3]f32) {
 	case .HAND:
 		HAND_BASE_POS :: [3]f32{10, -4, 0}
 		return HAND_BASE_POS
+	case .LOG:
+		LOG_BASE_POS :: [3]f32{4, 4, 0}
+		return LOG_BASE_POS
 	}
 	return
 }
-get_card_active_pos :: proc(entity: ^Entity) -> (pos: [3]f32) {
+get_card_active_pos :: proc(s: ^Game, entity: ^Entity) -> (pos: [3]f32) {
 	render_card := entity.variant.(^Render_Card)
 	switch render_card.location {
 	case .FIELD:
@@ -206,14 +236,24 @@ get_card_active_pos :: proc(entity: ^Entity) -> (pos: [3]f32) {
 		x_world := f32(render_card.idx) * CARD_OFFSET
 		pos.x = HAND_BASE_POS.x + x_world
 		pos.yz = HAND_BASE_POS.yz
+	case .LOG:
+		LOG_BASE_POS :: [3]f32{4, 4, 0}
+		CARD_OFFSET :: 1.2
+		x_world := f32(i32(s.k.log.len) - render_card.idx) * CARD_OFFSET
+		pos.x = LOG_BASE_POS.x + x_world
+		pos.yz = LOG_BASE_POS.yz
 	}
 	return
 }
-get_card_inactive_rot :: proc(entity: ^Entity) -> (rot: quaternion128) {
+get_card_start_rot :: proc(s: ^Game, entity: ^Entity) -> (rot: quaternion128) {
 	rot = lal.quaternion_from_pitch_yaw_roll_f32(0, lal.PI + 0.001, 0)
 	return
 }
-get_card_active_rot :: proc(entity: ^Entity) -> (rot: quaternion128) {
+get_card_inactive_rot :: proc(s: ^Game, entity: ^Entity) -> (rot: quaternion128) {
+	rot = lal.quaternion_from_pitch_yaw_roll_f32(0, lal.PI - 0.001, 0)
+	return
+}
+get_card_active_rot :: proc(s: ^Game, entity: ^Entity) -> (rot: quaternion128) {
 	rot = lal.quaternion_from_pitch_yaw_roll_f32(0, 0, 0)
 	return
 }
@@ -222,25 +262,29 @@ render_card :: proc(s: ^Game, entity: ^Entity) {
 	// interpolation
 	render_card := entity.variant.(^Render_Card)
 	card: ^kernel.Card
+	move: kernel.Move
 	switch render_card.location {
 	case .FIELD:
 		card = &s.k.field[render_card.idx]
 	case .HAND:
 		card = &s.k.hand[render_card.idx]
+	case .LOG:
+		move = s.k.log.data[render_card.idx]
+		render_move(s, entity)
+		return
 	}
-	c_active := kernel.is_card_active(card^)
-	if render_card.active != c_active {
-		render_card.active = c_active
+	if render_card.render_data.active != card.active {
+		render_card.render_data.active = card.active
 		pos: [3]f32
 		rot: quaternion128
-		if c_active {
-			pos = get_card_active_pos(entity)
-			rot = get_card_active_rot(entity)
-			render_card.pos.start = get_card_start_pos(entity)
-			render_card.rot.start = get_card_inactive_rot(entity)
+		if card.active {
+			pos = get_card_active_pos(s, entity)
+			rot = get_card_active_rot(s, entity)
+			render_card.pos.start = get_card_start_pos(s, entity)
+			render_card.rot.start = get_card_inactive_rot(s, entity)
 		} else {
-			pos = get_card_inactive_pos(entity)
-			rot = get_card_inactive_rot(entity)
+			pos = get_card_inactive_pos(s, entity)
+			rot = get_card_inactive_rot(s, entity)
 		}
 		an.set_target(&render_card.pos, s.time_s, pos)
 		CARD_ANIM_S :: 0.2
@@ -257,6 +301,10 @@ render_card :: proc(s: ^Game, entity: ^Entity) {
 		entity_id = entity.id,
 	}
 	renderer.draw_shape(s.r, card_req)
+
+	if render_card.location == .LOG {
+		// TODO render log card inners
+	}
 
 	// card name
 	NAME_POS: [3]f32 : {-0.5, 1, 0.01}
@@ -282,6 +330,10 @@ render_card :: proc(s: ^Game, entity: ^Entity) {
 		transform = hp_transform,
 	}
 	renderer.draw_text(s.r, hp_req)
+}
+
+render_move :: proc(s: ^Game, entity: ^Entity) {
+
 }
 
 // TODO

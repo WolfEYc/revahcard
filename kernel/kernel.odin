@@ -33,10 +33,7 @@ Card :: struct {
 	hp:           i32,
 	player_fl:    Card_Player,
 	frozen_turns: i32,
-}
-
-is_card_active :: proc(card: Card) -> bool {
-	return card.hp <= 0
+	active:       bool,
 }
 
 FIELD_W :: 4
@@ -99,7 +96,7 @@ reset_field :: proc(k: ^Kernel) {
 
 num_active_field :: proc(k: ^Kernel) -> (num_active: i32) {
 	for card in k.field {
-		num_active += i32(is_card_active(card))
+		num_active += i32(card.active)
 	}
 	return
 }
@@ -127,6 +124,8 @@ gen_card :: proc(k: ^Kernel) -> (card: Card) {
 	GEN_HP_STOP :: 3
 	card.hp = rand.int31_max(GEN_HP_STOP)
 	card.hp += 2
+
+	card.active = true
 	return
 }
 

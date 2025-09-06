@@ -26,13 +26,13 @@ move :: proc(k: ^Kernel, m: Move, log_move := true) -> (winner: Card_Player, err
 		return
 	}
 	card_hand := k.hand[m.hand]
-	if !is_card_active(card_hand) {
+	if !card_hand.active {
 		err = .HAND_INACTIVE
 		return
 	}
 
 	card_field := k.field[m.field]
-	if is_card_active(card_field) {
+	if card_field.active {
 		intersect_effect := card_hand.effects & card_field.effects
 		intersect_target := card_hand.targets & card_field.targets
 		buff := card(intersect_effect) * card(intersect_target)
@@ -53,10 +53,10 @@ move :: proc(k: ^Kernel, m: Move, log_move := true) -> (winner: Card_Player, err
 	k.field[m.field] = card_field
 
 	if k.log.len % 2 == 0 {
-		k.hand[m.hand] = Card{}
+		k.hand[m.hand].active = false
 	} else { 	// simulate
 		simulate(k)
-		reset_dead_cards(k)
+		mark_dead_cards_inactive(k)
 		reset_hand(k)
 		winner = get_winner(k)
 	}
@@ -80,7 +80,7 @@ time_machine :: proc(k: ^Kernel, move_idx: int) {
 
 simulate :: proc(k: ^Kernel) {
 	for i: i32 = 0; i < FIELD_SIZE; i += 1 {
-		if !is_card_active(k.field[i]) do continue
+		if !k.field[i].active do continue
 		if k.field[i].frozen_turns > 0 {
 			k.field[i].frozen_turns -= 1
 			continue
@@ -105,17 +105,13 @@ get_winner :: proc(k: ^Kernel) -> Card_Player {
 	return .NONE
 }
 
-reset_dead_cards :: proc(k: ^Kernel) {
+mark_dead_cards_inactive :: proc(k: ^Kernel) {
 	for i: i32 = 0; i < FIELD_SIZE; i += 1 {
-		if is_card_active(k.field[i]) do continue
-		reset_card(k, i)
+		if k.field[i].hp > 0 do continue
+		k.field[i].active = false
 	}
 }
 
-@(private)
-reset_card :: proc(k: ^Kernel, a: i32) {
-	k.field[a] = Card{}
-}
 
 to_grid :: proc(x: i32) -> (xy: [2]i32) {
 	assert(x < FIELD_SIZE)
