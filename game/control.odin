@@ -1,5 +1,6 @@
 package main
 
+import an "../animation"
 import "../kernel"
 import "../lib/pool"
 import "core:log"
@@ -29,26 +30,58 @@ control_eventhandle :: proc(s: ^Game, ev: sdl.Event) {
 m1_clicked :: proc(s: ^Game, ev: sdl.Event) {
 	clicked_entity, ok := pool.get(&s.entities, s.r.info_entity_id)
 	if !ok do return
-	switch v in clicked_entity.variant {
+	s.clicked_entity = s.r.info_entity_id
+	if kernel.turn(&s.k) != s.local_player do return
+	#partial switch v in clicked_entity.variant {
 	case ^Render_Card:
-		interact_card(s, v)
-	case ^Control:
-		switch v.control_type {
-		case .SUBMIT:
-			hold_submit(s, v)
-		case .RESIGN:
-			hold_resign(s, v)
+		if v.location == .HAND {
+			interact_card(s, v)
 		}
 	}
 	return
 }
 
 m1_released :: proc(s: ^Game, ev: sdl.Event) {
-	clicked_entity, ok := pool.get(&s.entities, s.r.info_entity_id)
-	if !ok do return
-	switch v in clicked_entity.variant {
+	defer s.clicked_entity = pool.Pool_Key{}
+	released_entity, ok := pool.get(&s.entities, s.r.info_entity_id)
+	if ok && s.r.info_entity_id == s.clicked_entity {
+		handle_release(s, released_entity)
+	} else if clicked_entity, ok := pool.get(&s.entities, s.clicked_entity); ok {
+		handle_standby(s, clicked_entity)
+	} else do return
+
+	if kernel.turn(&s.k) != s.local_player do return
+	#partial switch v in released_entity.variant {
 	case ^Render_Card:
-		interact_card(s, v)
+		_, has_hand_move := s.hand_move.?
+		if v.location == .FIELD && has_hand_move {
+			interact_card(s, v)
+		}
+	}
+	return
+}
+
+handle_hover :: proc(s: ^Game, e: ^Entity) {
+	an.set_target(&e.pos, s.time_s, e.hover_pos)
+	e.pos.ease = e.hover_ease
+	e.pos.end_s = s.time_s + e.hover_s
+	an.set_target(&e.rot, s.time_s, e.hover_rot)
+	e.rot.ease = e.hover_ease
+	e.rot.end_s = s.time_s + e.hover_s
+}
+
+handle_hold :: proc(s: ^Game, e: ^Entity) {
+	an.set_target(&e.pos, s.time_s, e.hold_pos)
+	e.pos.ease = e.hold_ease
+	e.pos.end_s = s.time_s + e.hold_s
+	an.set_target(&e.rot, s.time_s, e.hold_rot)
+	e.rot.ease = e.hold_ease
+	e.rot.end_s = s.time_s + e.hold_s
+}
+
+handle_release :: proc(s: ^Game, e: ^Entity) {
+	handle_standby(s, e)
+	#partial switch v in e.variant {
 	case ^Control:
 		switch v.control_type {
 		case .SUBMIT:
@@ -57,18 +90,26 @@ m1_released :: proc(s: ^Game, ev: sdl.Event) {
 			activate_resign(s, v)
 		}
 	}
-	return
+}
+
+handle_standby :: proc(s: ^Game, e: ^Entity) {
+	an.set_target(&e.pos, s.time_s, e.standby_pos)
+	e.pos.ease = e.standby_ease
+	e.pos.end_s = s.time_s + e.standby_s
+	an.set_target(&e.rot, s.time_s, e.standby_rot)
+	e.rot.ease = e.standby_ease
+	e.rot.end_s = s.time_s + e.standby_s
 }
 
 interact_card :: proc(s: ^Game, card: ^Render_Card) {
 	switch card.location {
 	case .HAND:
-		if kernel.is_card_active(s.k.hand[card.idx]) {
-			s.move.hand = card.idx
+		if s.k.hand[card.idx].active {
+			s.hand_move = card.idx
 		}
 	case .FIELD:
-		if kernel.is_card_active(s.k.field[card.idx]) {
-			s.move.field = card.idx
+		if s.k.field[card.idx].active {
+			s.field_move = card.idx
 		}
 	case .LOG:
 	// TODO time machine
@@ -76,23 +117,20 @@ interact_card :: proc(s: ^Game, card: ^Render_Card) {
 	return
 }
 
-hold_resign :: proc(s: ^Game, control: ^Control) {
-	// TODO perhaps some animation showing that they are holding the button
-}
-hold_simulate :: proc(s: ^Game, control: ^Control) {
-	// TODO perhaps some animation showing that they are holding the button
-}
-hold_submit :: proc(s: ^Game, control: ^Control) {
-	// TODO perhaps some animation showing that they are holding the submit button down
-}
 
 activate_submit :: proc(s: ^Game, control: ^Control) {
-	if s.move.hand < 0 || s.move.field < 0 {
+	move: kernel.Move
+	has_hand: bool
+	has_field: bool
+	move.hand, has_hand = s.hand_move.?
+	move.field, has_field = s.field_move.?
+	if !has_hand || !has_field {
 		//TODO play some sort of error animation
 		// to indicate to the user that they need to pick a field & hand card
+		log.errorf("tried to submit has_hand=%v has_field=%v", has_hand, has_field)
 		return
 	}
-	winner, err := kernel.move(&s.k, s.move)
+	winner, err := kernel.move(&s.k, move)
 	switch err {
 	case .HAND_OUT_OF_RANGE, .HAND_INACTIVE, .FIELD_OUT_OF_RANGE:
 		log.panicf("err in submit, move_err=%v", err)
@@ -101,7 +139,7 @@ activate_submit :: proc(s: ^Game, control: ^Control) {
 		return
 	case .INVALID_MERGE:
 		// TODO play some animation to tell the player its not a valid merge
-		log.errorf("invalid merge: %v", s.move)
+		log.errorf("invalid merge: %v", move)
 		return
 	case .NONE:
 	}
@@ -112,11 +150,10 @@ activate_submit :: proc(s: ^Game, control: ^Control) {
 		return
 	}
 }
-// TODO
+
 activate_resign :: proc(s: ^Game, control: ^Control) {
-}
-//TODO
-activate_simulate :: proc(s: ^Game, control: ^Control) {
+	s.hand_move = -i32(s.opponent)
+	s.field_move = -i32(s.opponent)
 }
 
 // TODO

@@ -98,8 +98,6 @@ load_assets :: proc(s: ^Game) {
 }
 
 Render_Card :: struct {
-	pos:         an.Interpolated([3]f32),
-	rot:         an.Interpolated(quaternion128),
 	location:    Card_Location,
 	idx:         i32,
 	render_data: kernel.Card,
@@ -107,14 +105,6 @@ Render_Card :: struct {
 
 Control :: struct {
 	control_type: Control_Type,
-	pos:          an.Interpolated([3]f32),
-	rot:          an.Interpolated(quaternion128),
-	hover_pos:    [3]f32,
-	hover_rot:    quaternion128,
-	submit_pos:   [3]f32,
-	submit_rot:   quaternion128,
-	standby_pos:  [3]f32,
-	standby_rot:  quaternion128,
 }
 
 NUM_CARDS :: kernel.FIELD_SIZE + kernel.HAND_SIZE + kernel.MAX_MOVES
@@ -258,6 +248,7 @@ get_card_active_rot :: proc(s: ^Game, entity: ^Entity) -> (rot: quaternion128) {
 	return
 }
 
+CARD_ANIM_S :: 0.2
 render_card :: proc(s: ^Game, entity: ^Entity) {
 	// interpolation
 	render_card := entity.variant.(^Render_Card)
@@ -275,25 +266,25 @@ render_card :: proc(s: ^Game, entity: ^Entity) {
 	}
 	if render_card.render_data.active != card.active {
 		render_card.render_data.active = card.active
+		entity.interactable = card.active
 		pos: [3]f32
 		rot: quaternion128
 		if card.active {
 			pos = get_card_active_pos(s, entity)
 			rot = get_card_active_rot(s, entity)
-			render_card.pos.start = get_card_start_pos(s, entity)
-			render_card.rot.start = get_card_inactive_rot(s, entity)
+			entity.pos.start = get_card_start_pos(s, entity)
+			entity.rot.start = get_card_inactive_rot(s, entity)
 		} else {
 			pos = get_card_inactive_pos(s, entity)
 			rot = get_card_inactive_rot(s, entity)
 		}
-		an.set_target(&render_card.pos, s.time_s, pos)
-		CARD_ANIM_S :: 0.2
-		render_card.pos.end_s = s.time_s + CARD_ANIM_S
+		an.set_target(&entity.pos, s.time_s, pos)
+		entity.pos.end_s = s.time_s + CARD_ANIM_S
 	}
 
 	// card
-	card_pos := an.interpolate(render_card.pos, s.time_s)
-	card_rot := an.interpolate(render_card.rot, s.time_s)
+	card_pos := an.interpolate(entity.pos, s.time_s)
+	card_rot := an.interpolate(entity.rot, s.time_s)
 	transform := lal.matrix4_from_trs(card_pos, card_rot, 1)
 	card_req := renderer.Draw_Shape_Req {
 		shape     = &s.assets.card,
@@ -304,6 +295,8 @@ render_card :: proc(s: ^Game, entity: ^Entity) {
 
 	if render_card.location == .LOG {
 		// TODO render log card inners
+
+		return
 	}
 
 	// card name
@@ -330,10 +323,6 @@ render_card :: proc(s: ^Game, entity: ^Entity) {
 		transform = hp_transform,
 	}
 	renderer.draw_text(s.r, hp_req)
-}
-
-render_move :: proc(s: ^Game, entity: ^Entity) {
-
 }
 
 // TODO

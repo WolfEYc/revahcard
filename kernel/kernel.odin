@@ -129,3 +129,8 @@ gen_card :: proc(k: ^Kernel) -> (card: Card) {
 	return
 }
 
+
+turn :: proc(k: ^Kernel) -> (player: Card_Player) {
+	return (k.log.len + 1) % 4 < 2 ? .BLUE : .RED
+}
+

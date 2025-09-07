@@ -1,5 +1,6 @@
 package main
 
+import an "../animation"
 import "../lib/pool"
 import "core:log"
 
@@ -10,10 +11,25 @@ EType :: union {
 }
 
 Entity :: struct {
-	id:          pool.Pool_Key,
-	name:        string,
-	variant:     EType,
-	_marked_del: bool,
+	id:           pool.Pool_Key,
+	name:         string,
+	variant:      EType,
+	_marked_del:  bool,
+	interactable: bool,
+	pos:          an.Interpolated([3]f32),
+	rot:          an.Interpolated(quaternion128),
+	hover_pos:    [3]f32,
+	hold_pos:     [3]f32,
+	standby_pos:  [3]f32,
+	hover_rot:    quaternion128,
+	hold_rot:     quaternion128,
+	standby_rot:  quaternion128,
+	hover_ease:   an.Ease,
+	hold_ease:    an.Ease,
+	standby_ease: an.Ease,
+	hover_s:      f32,
+	hold_s:       f32,
+	standby_s:    f32,
 }
 
 insert_entity :: proc(s: ^Game, e: ^Entity, loc := #caller_location) {

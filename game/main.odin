@@ -17,24 +17,28 @@ import "core:time"
 import sdl "vendor:sdl3"
 
 Game :: struct {
-	time_s:       f32,
-	ticks:        u64,
-	ticks_ns:     u64,
-	deltatime:    f32, // in seconds
-	movedir:      [2]f32,
-	mouse_delta:  [2]f32,
-	rot:          [3]f32, // yaw pitch roll
-	freecam:      bool,
+	time_s:         f32,
+	ticks:          u64,
+	ticks_ns:       u64,
+	deltatime:      f32, // in seconds
+	movedir:        [2]f32,
+	mouse_delta:    [2]f32,
+	rot:            [3]f32, // yaw pitch roll
+	freecam:        bool,
 
 	// kernel
-	k:            kernel.Kernel,
-	move:         kernel.Move,
+	k:              kernel.Kernel,
+	hand_move:      Maybe(i32),
+	field_move:     Maybe(i32),
+	local_player:   kernel.Card_Player,
+	opponent:       kernel.Card_Player,
 
 	// render
-	r:            ^renderer.Renderer,
-	assets:       Render_Assets,
-	render_state: Render_State,
-	entities:     pool.Pool(Entity),
+	r:              ^renderer.Renderer,
+	assets:         Render_Assets,
+	render_state:   Render_State,
+	entities:       pool.Pool(Entity),
+	clicked_entity: pool.Pool_Key,
 }
 
 main :: proc() {

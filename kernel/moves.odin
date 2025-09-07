@@ -13,6 +13,9 @@ Move_Error :: enum {
 }
 
 move :: proc(k: ^Kernel, m: Move, log_move := true) -> (winner: Card_Player, err: Move_Error) {
+	if m.hand < 0 {
+		winner = Card_Player(-m.hand)
+	}
 	if k.log.len == MAX_MOVES {
 		err = .MOVE_LIMIT_REACHED
 		return
