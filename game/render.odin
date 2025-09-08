@@ -249,6 +249,8 @@ get_card_active_rot :: proc(s: ^Game, entity: ^Entity) -> (rot: quaternion128) {
 }
 
 CARD_ANIM_S :: 0.2
+BLUE_COLOR: [4]f32 : {0, 1, 1, 1}
+RED_COLOR: [4]f32 : {1, 0, 0, 1}
 render_card :: proc(s: ^Game, entity: ^Entity) {
 	// interpolation
 	render_card := entity.variant.(^Render_Card)
@@ -261,7 +263,6 @@ render_card :: proc(s: ^Game, entity: ^Entity) {
 		card = &s.k.hand[render_card.idx]
 	case .LOG:
 		move = s.k.log.data[render_card.idx]
-		render_move(s, entity)
 		return
 	}
 	if render_card.render_data.active != card.active {
@@ -294,8 +295,30 @@ render_card :: proc(s: ^Game, entity: ^Entity) {
 	renderer.draw_shape(s.r, card_req)
 
 	if render_card.location == .LOG {
-		// TODO render log card inners
+		turn := kernel.turn_player(int(render_card.idx))
+		color := turn == .BLUE ? BLUE_COLOR : RED_COLOR
 
+		HAND_POS: [3]f32 : {0, 0.9, 0.01}
+		hand_transform := transform * lal.matrix4_from_trs(HAND_POS, 1, 1)
+		hand_buf: [2]byte
+		hand_str := strconv.itoa(hand_buf[:], int(move.hand))
+		hand_req := renderer.Draw_Text_Req {
+			text      = hand_str,
+			transform = hand_transform,
+			color     = color,
+		}
+		renderer.draw_text(s.r, hand_req)
+
+		FIELD_POS: [3]f32 : {0, -0.5, 0.01}
+		field_transform := transform * lal.matrix4_from_trs(FIELD_POS, 1, 1)
+		field_buf: [2]byte
+		field_str := strconv.itoa(field_buf[:], int(move.field))
+		field_req := renderer.Draw_Text_Req {
+			text      = field_str,
+			transform = hand_transform,
+			color     = color,
+		}
+		renderer.draw_text(s.r, field_req)
 		return
 	}
 
@@ -325,8 +348,14 @@ render_card :: proc(s: ^Game, entity: ^Entity) {
 	renderer.draw_text(s.r, hp_req)
 }
 
-// TODO
 render_control :: proc(s: ^Game, entity: ^Entity) {
-
+	req: renderer.Draw_Node_Req
+	req.entity_id = entity.id
+	pos := an.interpolate(entity.pos, s.time_s)
+	rot := an.interpolate(entity.rot, s.time_s)
+	req.transform = lal.matrix4_from_trs(pos, rot, 1)
+	control := entity.variant.(^Control)
+	req.model = &s.assets.controls[control.control_type]
+	renderer.draw_node(s.r, req)
 }
 

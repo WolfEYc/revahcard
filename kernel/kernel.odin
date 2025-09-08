@@ -58,11 +58,12 @@ Kernel_Rand :: struct {
 }
 
 Kernel :: struct {
-	rng:     Kernel_Rand,
-	field:   Field,
-	hand:    Hand,
-	log:     Log,
-	name_db: Name_DB,
+	rng:      Kernel_Rand,
+	field:    Field,
+	hand:     Hand,
+	log:      Log,
+	turn_idx: int,
+	name_db:  Name_DB,
 }
 
 new_game :: proc(seed: u64) -> (k: Kernel) {
@@ -130,7 +131,10 @@ gen_card :: proc(k: ^Kernel) -> (card: Card) {
 }
 
 
-turn :: proc(k: ^Kernel) -> (player: Card_Player) {
-	return (k.log.len + 1) % 4 < 2 ? .BLUE : .RED
+current_turn_player :: proc(k: ^Kernel) -> (player: Card_Player) {
+	return turn_player(k.turn_idx)
+}
+turn_player :: proc(idx: int) -> (player: Card_Player) {
+	return (idx + 1) % 4 < 2 ? .BLUE : .RED
 }
 

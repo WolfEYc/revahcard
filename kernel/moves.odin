@@ -70,6 +70,19 @@ move :: proc(k: ^Kernel, m: Move, log_move := true) -> (winner: Card_Player, err
 	return
 }
 
+Confirm_Move_Err :: enum {
+	NONE,
+	NO_MOVE,
+	CORRUPTION,
+}
+
+confirm_move :: proc(k: ^Kernel) -> (err: Confirm_Move_Err) {
+	if k.turn_idx == k.log.len do return .NO_MOVE
+	if k.turn_idx != k.log.len - 1 do return .CORRUPTION
+	k.turn_idx += 1
+	return
+}
+
 time_machine :: proc(k: ^Kernel, move_idx: int) {
 	assert(move_idx < k.log.len)
 	reset_rng(k)

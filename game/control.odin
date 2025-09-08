@@ -29,13 +29,13 @@ control_eventhandle :: proc(s: ^Game, ev: sdl.Event) {
 
 m1_clicked :: proc(s: ^Game, ev: sdl.Event) {
 	clicked_entity, ok := pool.get(&s.entities, s.r.info_entity_id)
-	if !ok do return
+	if !ok || !clicked_entity.interactable do return
 	s.clicked_entity = s.r.info_entity_id
-	if kernel.turn(&s.k) != s.local_player do return
+	if kernel.current_turn_player(&s.k) != s.local_player do return
 	#partial switch v in clicked_entity.variant {
 	case ^Render_Card:
 		if v.location == .HAND {
-			interact_card(s, v)
+			s.hand_move = v.idx
 		}
 	}
 	return
@@ -50,12 +50,32 @@ m1_released :: proc(s: ^Game, ev: sdl.Event) {
 		handle_standby(s, clicked_entity)
 	} else do return
 
-	if kernel.turn(&s.k) != s.local_player do return
+	if kernel.current_turn_player(&s.k) != s.local_player do return
 	#partial switch v in released_entity.variant {
 	case ^Render_Card:
-		_, has_hand_move := s.hand_move.?
-		if v.location == .FIELD && has_hand_move {
-			interact_card(s, v)
+		hand_move, has_hand_move := s.hand_move.?
+		if !has_hand_move || v.location != .FIELD do break
+		s.field_move = v.idx
+		move := kernel.Move {
+			hand  = hand_move,
+			field = v.idx,
+		}
+		if s.k.turn_idx == s.k.log.len - 1 {
+			// undo unconfirmed move
+			s.k.log.len -= 1
+		}
+		winner, err := kernel.move(&s.k, move)
+		switch err {
+		case .HAND_OUT_OF_RANGE, .HAND_INACTIVE, .FIELD_OUT_OF_RANGE:
+			log.panicf("err in submit, move_err=%v", err)
+		case .MOVE_LIMIT_REACHED:
+			handle_win(s, winner)
+			return
+		case .INVALID_MERGE:
+			// TODO play some animation to tell the player its not a valid merge
+			log.errorf("invalid merge: %v", move)
+			return
+		case .NONE:
 		}
 	}
 	return
@@ -81,7 +101,13 @@ handle_hold :: proc(s: ^Game, e: ^Entity) {
 
 handle_release :: proc(s: ^Game, e: ^Entity) {
 	handle_standby(s, e)
-	#partial switch v in e.variant {
+	switch v in e.variant {
+	case ^Render_Card:
+		#partial switch v.location {
+		case .LOG:
+			if int(v.idx) == s.k.log.len - 1 do break
+			kernel.time_machine(&s.k, int(v.idx))
+		}
 	case ^Control:
 		switch v.control_type {
 		case .SUBMIT:
@@ -101,59 +127,39 @@ handle_standby :: proc(s: ^Game, e: ^Entity) {
 	e.rot.end_s = s.time_s + e.standby_s
 }
 
-interact_card :: proc(s: ^Game, card: ^Render_Card) {
-	switch card.location {
-	case .HAND:
-		if s.k.hand[card.idx].active {
-			s.hand_move = card.idx
-		}
-	case .FIELD:
-		if s.k.field[card.idx].active {
-			s.field_move = card.idx
-		}
-	case .LOG:
-	// TODO time machine
-	}
-	return
-}
-
-
 activate_submit :: proc(s: ^Game, control: ^Control) {
-	move: kernel.Move
-	has_hand: bool
-	has_field: bool
-	move.hand, has_hand = s.hand_move.?
-	move.field, has_field = s.field_move.?
-	if !has_hand || !has_field {
-		//TODO play some sort of error animation
-		// to indicate to the user that they need to pick a field & hand card
-		log.errorf("tried to submit has_hand=%v has_field=%v", has_hand, has_field)
-		return
-	}
-	winner, err := kernel.move(&s.k, move)
+	err := kernel.confirm_move(&s.k)
 	switch err {
-	case .HAND_OUT_OF_RANGE, .HAND_INACTIVE, .FIELD_OUT_OF_RANGE:
-		log.panicf("err in submit, move_err=%v", err)
-	case .MOVE_LIMIT_REACHED:
-		handle_win(s, winner)
-		return
-	case .INVALID_MERGE:
-		// TODO play some animation to tell the player its not a valid merge
-		log.errorf("invalid merge: %v", move)
-		return
+	case .CORRUPTION:
+		log.panicf(
+			"kernel corruption when submitting, turn_idx=%d len(log)=%d",
+			s.k.turn_idx,
+			s.k.log.len,
+		)
+	case .NO_MOVE:
+		// TODO some animation indicated that you cant submit with no move
+		log.errorf(
+			"tried to submit with no move, turn_idx=%d len(log)=%d",
+			s.k.turn_idx,
+			s.k.log.len,
+		)
 	case .NONE:
-	}
-	switch winner {
-	case .NONE:
-	case .RED, .BLUE:
-		handle_win(s, winner)
-		return
+		winner := kernel.get_winner(&s.k)
+		switch winner {
+		case .NONE:
+			log.infof("submit success! turn_idx=%d len(log)=%d", s.k.turn_idx, s.k.log.len)
+		case .RED, .BLUE:
+			handle_win(s, winner)
+		}
 	}
 }
 
 activate_resign :: proc(s: ^Game, control: ^Control) {
-	s.hand_move = -i32(s.opponent)
-	s.field_move = -i32(s.opponent)
+	move := kernel.Move {
+		hand  = -i32(s.opponent),
+		field = -i32(s.opponent),
+	}
+	kernel.move(&s.k, move)
 }
 
 // TODO
