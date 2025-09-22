@@ -68,6 +68,9 @@ Kernel :: struct {
 
 new_game :: proc(seed: u64) -> (k: Kernel) {
 	k.rng.seed = seed
+	db, err := make_name_db()
+	if err != nil do log.panicf("err making namedb, reason: %v", err)
+	k.name_db = db
 	reset_rng(&k)
 	reset_hand(&k)
 	reset_field(&k)
