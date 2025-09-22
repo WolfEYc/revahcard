@@ -175,7 +175,6 @@ card_to_name :: proc(db: Name_DB, card: Card) -> (name: Card_Name) {
 	}
 	food_data := transmute([size_of(food_data_mat)]byte)food_data_mat
 	food_hash := hash.fnv32a(food_data[:])
-	log.infof("freezer=%v", db.food)
 	food_idx := food_hash % u32(len(db.food))
 	name.food = db.food[food_idx]
 
@@ -191,7 +190,6 @@ card_to_name :: proc(db: Name_DB, card: Card) -> (name: Card_Name) {
 	}
 	color_data := transmute([size_of(color_data_mat)]byte)color_data_mat
 	color_hash := hash.fnv32a(color_data[:])
-	log.infof("refrigerator=%v", db.color)
 	color_idx := color_hash % u32(len(db.color))
 	name.color = db.color[color_idx]
 	return

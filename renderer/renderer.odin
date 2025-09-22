@@ -198,36 +198,43 @@ init_pbr_pipe :: proc(r: ^Renderer) {
 		{slot = 3, pitch = size_of([2]f32)},
 		{slot = 4, pitch = size_of([2]f32)},
 	}
+	props := sdl.CreateProperties()
+	ok := sdl.SetStringProperty(
+		props,
+		sdl.PROP_GPU_GRAPHICSPIPELINE_CREATE_NAME_STRING,
+		"pbr_pipeline",
+	);assert(ok)
 	r._pbr_pipeline = sdl.CreateGPUGraphicsPipeline(
-	r._gpu,
-	{
-		vertex_shader = vert_shader,
-		fragment_shader = frag_shader,
-		primitive_type = .TRIANGLELIST,
-		vertex_input_state = {
-			num_vertex_buffers = u32(len(vertex_buffer_descriptions)),
-			vertex_buffer_descriptions = raw_data(vertex_buffer_descriptions),
-			num_vertex_attributes = u32(len(vertex_attrs)),
-			vertex_attributes = raw_data(vertex_attrs),
+		r._gpu,
+		{
+			props = props,
+			vertex_shader = vert_shader,
+			fragment_shader = frag_shader,
+			primitive_type = .TRIANGLELIST,
+			vertex_input_state = {
+				num_vertex_buffers = u32(len(vertex_buffer_descriptions)),
+				vertex_buffer_descriptions = raw_data(vertex_buffer_descriptions),
+				num_vertex_attributes = u32(len(vertex_attrs)),
+				vertex_attributes = raw_data(vertex_attrs),
+			},
+			depth_stencil_state = {
+				enable_depth_test = true,
+				enable_depth_write = true,
+				compare_op = .LESS,
+			},
+			rasterizer_state = {
+				cull_mode = .BACK,
+				// fill_mode = .LINE,
+			},
+			target_info = {
+				num_color_targets = 1,
+				color_target_descriptions = &(sdl.GPUColorTargetDescription {
+						format = r._gpu_texture_format,
+					}),
+				has_depth_stencil_target = true,
+				depth_stencil_format = GPU_DEPTH_TEX_FMT,
+			},
 		},
-		depth_stencil_state = {
-			enable_depth_test = true,
-			enable_depth_write = true,
-			compare_op = .LESS,
-		},
-		rasterizer_state = {
-			cull_mode = .BACK,
-			// fill_mode = .LINE,
-		},
-		target_info = {
-			num_color_targets = 1,
-			color_target_descriptions = &(sdl.GPUColorTargetDescription {
-					format = r._gpu_texture_format,
-				}),
-			has_depth_stencil_target = true,
-			depth_stencil_format = GPU_DEPTH_TEX_FMT,
-		},
-	},
 	);sdle.err(r._pbr_pipeline)
 	sdl.ReleaseGPUShader(r._gpu, vert_shader)
 	sdl.ReleaseGPUShader(r._gpu, frag_shader)
@@ -252,9 +259,16 @@ init_pbr_text_pipe :: proc(r: ^Renderer) {
 		{slot = 0, pitch = size_of([3]f32)},
 		{slot = 1, pitch = size_of([2]f32)},
 	}
+	props := sdl.CreateProperties()
+	ok := sdl.SetStringProperty(
+		props,
+		sdl.PROP_GPU_GRAPHICSPIPELINE_CREATE_NAME_STRING,
+		"text_pbr_pipeline",
+	);assert(ok)
 	r._pbr_text_pipeline = sdl.CreateGPUGraphicsPipeline(
 		r._gpu,
 		{
+			props = props,
 			vertex_shader = vert_shader,
 			fragment_shader = frag_shader,
 			primitive_type = .TRIANGLELIST,
@@ -311,9 +325,16 @@ init_pbr_shape_pipe :: proc(r: ^Renderer) {
 	vertex_buffer_descriptions := []sdl.GPUVertexBufferDescription {
 		{slot = 0, pitch = size_of([3]f32)},
 	}
+	props := sdl.CreateProperties()
+	ok := sdl.SetStringProperty(
+		props,
+		sdl.PROP_GPU_GRAPHICSPIPELINE_CREATE_NAME_STRING,
+		"shape_pbr_pipeline",
+	);assert(ok)
 	r._pbr_shape_pipeline = sdl.CreateGPUGraphicsPipeline(
 		r._gpu,
 		{
+			props = props,
 			vertex_shader = vert_shader,
 			fragment_shader = frag_shader,
 			primitive_type = .TRIANGLELIST,
@@ -357,34 +378,41 @@ init_info_pipe :: proc(r: ^Renderer) {
 	vertex_buffer_descriptions := []sdl.GPUVertexBufferDescription {
 		{slot = 0, pitch = size_of([3]f32)},
 	}
+	props := sdl.CreateProperties()
+	ok := sdl.SetStringProperty(
+		props,
+		sdl.PROP_GPU_GRAPHICSPIPELINE_CREATE_NAME_STRING,
+		"info_pipeline",
+	);assert(ok)
 	r._info_pipeline = sdl.CreateGPUGraphicsPipeline(
-	r._gpu,
-	{
-		vertex_shader = vert_shader,
-		fragment_shader = frag_shader,
-		primitive_type = .TRIANGLELIST,
-		vertex_input_state = {
-			num_vertex_buffers = u32(len(vertex_buffer_descriptions)),
-			vertex_buffer_descriptions = raw_data(vertex_buffer_descriptions),
-			num_vertex_attributes = u32(len(vertex_attrs)),
-			vertex_attributes = raw_data(vertex_attrs),
+		r._gpu,
+		{
+			props = props,
+			vertex_shader = vert_shader,
+			fragment_shader = frag_shader,
+			primitive_type = .TRIANGLELIST,
+			vertex_input_state = {
+				num_vertex_buffers = u32(len(vertex_buffer_descriptions)),
+				vertex_buffer_descriptions = raw_data(vertex_buffer_descriptions),
+				num_vertex_attributes = u32(len(vertex_attrs)),
+				vertex_attributes = raw_data(vertex_attrs),
+			},
+			depth_stencil_state = {
+				enable_depth_test = true,
+				enable_depth_write = true,
+				compare_op = .LESS,
+			},
+			rasterizer_state = {
+				cull_mode = .BACK,
+				// fill_mode = .LINE,
+			},
+			target_info = {
+				num_color_targets = 1,
+				color_target_descriptions = &(sdl.GPUColorTargetDescription{format = .R32_INT}),
+				has_depth_stencil_target = true,
+				depth_stencil_format = GPU_DEPTH_TEX_FMT,
+			},
 		},
-		depth_stencil_state = {
-			enable_depth_test = true,
-			enable_depth_write = true,
-			compare_op = .LESS,
-		},
-		rasterizer_state = {
-			cull_mode = .BACK,
-			// fill_mode = .LINE,
-		},
-		target_info = {
-			num_color_targets = 1,
-			color_target_descriptions = &(sdl.GPUColorTargetDescription{format = .R32_INT}),
-			has_depth_stencil_target = true,
-			depth_stencil_format = GPU_DEPTH_TEX_FMT,
-		},
-	},
 	);sdle.err(r._info_pipeline)
 	sdl.ReleaseGPUShader(r._gpu, vert_shader)
 	sdl.ReleaseGPUShader(r._gpu, frag_shader)
@@ -405,9 +433,16 @@ init_shadow_pipe :: proc(r: ^Renderer) {
 	vertex_buffer_descriptions := []sdl.GPUVertexBufferDescription {
 		{slot = 0, pitch = size_of([3]f32)},
 	}
+	props := sdl.CreateProperties()
+	ok := sdl.SetStringProperty(
+		props,
+		sdl.PROP_GPU_GRAPHICSPIPELINE_CREATE_NAME_STRING,
+		"shadow_pipeline",
+	);assert(ok)
 	r._shadow_pipeline = sdl.CreateGPUGraphicsPipeline(
 		r._gpu,
 		{
+			props = props,
 			vertex_shader = vert_shader,
 			fragment_shader = frag_shader,
 			primitive_type = .TRIANGLELIST,
@@ -1250,8 +1285,10 @@ bind_material :: proc(r: ^Renderer, render_pass: ^sdl.GPURenderPass, material: ^
 
 end_render :: proc(r: ^Renderer) {
 	assert(r._render_cmd_buf != nil)
-	assert(r._render_pass != nil)
-	sdl.EndGPURenderPass(r._render_pass)
+	// assert(r._render_pass != nil)
+	if r._render_pass != nil {
+		sdl.EndGPURenderPass(r._render_pass)
+	}
 	if r.info_cursor.x < 0 || r.info_cursor.y < 0 {
 		ok := sdl.SubmitGPUCommandBuffer(r._render_cmd_buf);sdle.err(ok)
 	} else {
